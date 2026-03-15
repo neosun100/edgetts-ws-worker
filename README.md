@@ -8,25 +8,33 @@ A Cloudflare Worker that connects to Microsoft Edge TTS via WebSocket to provide
 
 ## How It Works
 
-The Worker implements the full Edge TTS WebSocket protocol including DRM token generation (`Sec-MS-GEC`), Chrome fingerprint headers, and SSML message framing. It connects to Bing's TTS WebSocket, collects `WordBoundary` events and audio chunks, then returns them to the client.
-
 ```
 Client POST → CF Worker (edge) → Bing TTS WebSocket → WordBoundary + audio
                                                               ↓
-                                                   JSON or NDJSON stream
+                                                   JSON or NDJSON stream → Client
 ```
+
+The Worker implements the full Edge TTS WebSocket protocol from scratch (no external libraries):
+1. **DRM token generation** (`Sec-MS-GEC`) — SHA-256 hash of Windows file time + TrustedClientToken
+2. **Chrome fingerprint headers** — Origin, User-Agent, Cookie (MUID) mimicking Edge browser extension
+3. **SSML message framing** — speech.config + ssml messages over WebSocket
+4. **Binary audio parsing** — extracts audio data from WebSocket binary frames (2-byte header length prefix)
 
 ## ⚠️ Critical: Custom Domain Limitation
 
-> **Outbound WebSocket connections from Cloudflare Workers only work on the default `*.workers.dev` domain.** Custom domains via Workers Routes (e.g., `edgetts.example.com`) will fail with "WebSocket upgrade failed" because Cloudflare's proxy layer interferes with the outbound WebSocket handshake.
+> **Outbound WebSocket connections from Cloudflare Workers ONLY work on the default `*.workers.dev` domain.**
 >
-> **Always use the `*.workers.dev` URL for this Worker.**
+> Custom domains via Workers Routes or AAAA `100::` records will fail with `"WebSocket upgrade failed"` because Cloudflare's proxy layer interferes with the outbound WebSocket handshake to Bing.
 
 | Domain Type | Outbound WebSocket | Status |
 |-------------|-------------------|--------|
-| `*.workers.dev` | ✅ Works | Use this |
+| `*.workers.dev` | ✅ Works | **Use this** |
 | Custom domain (Workers Route) | ❌ Fails | Do not use |
-| Custom domain (AAAA 100::) | ❌ Fails | Do not use |
+| Custom domain (AAAA `100::`) | ❌ Fails | Do not use |
+
+This was discovered during development after multiple failed attempts. The Worker code itself is correct — the issue is at the Cloudflare infrastructure level when routing through custom domains.
+
+**Workaround**: Use the `*.workers.dev` URL directly from your frontend. If you need a custom domain, use the [edgetts-ws](https://github.com/neosun100/edgetts-ws) Python server instead.
 
 ## Features
 
@@ -34,32 +42,24 @@ Client POST → CF Worker (edge) → Bing TTS WebSocket → WordBoundary + audio
 - ⚡ **Streaming mode** — NDJSON for low-latency, real-time applications
 - 📦 **Non-streaming mode** — single JSON response
 - 🌍 **Global edge** — runs on Cloudflare's 300+ edge locations
-- 🔐 **DRM token** — auto-generates `Sec-MS-GEC` token for Bing authentication
+- 🔐 **DRM token** — auto-generates `Sec-MS-GEC` token via Web Crypto API
 - 🆓 **Free tier** — 100K requests/day on Workers free plan
 - 🌐 **CORS enabled** — ready for browser frontends
 
 ## Quick Start
 
-### Deploy with Wrangler
-
 ```bash
+# Deploy with Wrangler CLI
 npx wrangler deploy worker.js --name edgetts-ws-worker --compatibility-date 2024-12-13
 ```
 
-The Worker will be available at `https://edgetts-ws-worker.<your-subdomain>.workers.dev`.
-
-### Deploy via Dashboard
-
-1. Go to [Cloudflare Dashboard → Workers](https://dash.cloudflare.com/?to=/:account/workers)
-2. Create a new Worker
-3. Paste the contents of `worker.js`
-4. Deploy
+Or copy `worker.js` into the [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/workers) editor.
 
 ## API
 
 ### `POST /v1/audio/speech`
 
-Identical API to [edgetts-ws](https://github.com/neosun100/edgetts-ws) (the Python server version).
+**100% API-compatible** with [edgetts-ws](https://github.com/neosun100/edgetts-ws) (the Python server). They are interchangeable.
 
 **Request:**
 
@@ -101,59 +101,84 @@ Identical API to [edgetts-ws](https://github.com/neosun100/edgetts-ws) (the Pyth
 {"type":"done"}
 ```
 
+All timestamps are in milliseconds. Both modes return identical timestamp data — the only difference is delivery method.
+
 ## DRM Token Generation
 
-The Worker implements Microsoft's `Sec-MS-GEC` DRM token algorithm:
-
-1. Get current Unix timestamp with clock skew correction
-2. Convert to Windows file time epoch (add 11644473600 seconds)
-3. Round down to nearest 5 minutes (300 seconds)
-4. Convert to 100-nanosecond intervals
-5. Concatenate with `TrustedClientToken`
-6. SHA-256 hash → uppercase hex
-
-This is computed using the Web Crypto API (`crypto.subtle.digest`).
-
-## Architecture
+The Worker implements Microsoft's `Sec-MS-GEC` algorithm using Web Crypto API:
 
 ```
-┌─────────┐    HTTPS POST     ┌─────────────┐   WebSocket (https://)  ┌──────────────┐
-│  Client  │ ────────────────→ │  CF Worker   │ ─────────────────────→ │ Bing TTS API │
-│ (browser)│ ←──────────────── │ (workers.dev)│ ←───────────────────── │  (Microsoft) │
-└─────────┘  JSON or NDJSON   └─────────────┘   audio + WordBoundary  └──────────────┘
+1. Unix timestamp (seconds) + 11644473600 (Windows epoch offset)
+2. Round down to nearest 300 seconds (5 minutes)
+3. Multiply by 10^7 (convert to 100-nanosecond intervals)
+4. Concatenate with TrustedClientToken string
+5. SHA-256 hash → uppercase hex string
 ```
 
-Key implementation details:
-- Uses `fetch()` with `Upgrade: websocket` header (not `wss://` URL)
-- Sets `Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold` to mimic Edge browser
-- Generates random MUID cookie for each request
-- Streaming mode uses `TransformStream` for chunked response
+This token is passed as a URL parameter on the WebSocket connection.
+
+## WebSocket Connection Details
+
+```
+URL: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1
+     ?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4
+     &ConnectionId={uuid}
+     &Sec-MS-GEC={drm_token}
+     &Sec-MS-GEC-Version=1-143.0.3650.75
+
+Headers:
+  Upgrade: websocket
+  Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold
+  User-Agent: Mozilla/5.0 ... Chrome/143.0.0.0 ... Edg/143.0.0.0
+  Cookie: muid={random_hex};
+
+Messages sent:
+  1. speech.config (JSON) — output format + metadata options
+  2. ssml (XML) — voice, rate, text wrapped in SSML
+
+Messages received:
+  - Text: audio.metadata (WordBoundary JSON) or turn.end
+  - Binary: audio data (2-byte header length prefix + header + MP3 data)
+```
+
+> **Important**: CF Workers use `fetch()` with `https://` URL + `Upgrade: websocket` header, NOT `wss://` URL. The `wss://` scheme causes `"Fetch API cannot load"` errors.
 
 ## Comparison with edgetts-ws (Python)
 
 | Feature | edgetts-ws-worker (CF) | edgetts-ws (Python) |
 |---------|----------------------|---------------------|
 | Runtime | Cloudflare Workers | Python + aiohttp |
+| WebSocket library | From scratch (fetch + Upgrade) | `edge_tts` library |
 | Hosting | Serverless (free tier) | VPS required |
 | Latency | Global edge (~50ms) | Single location |
 | Custom domain | ❌ workers.dev only | ✅ Any domain |
 | Streaming | ✅ NDJSON | ✅ NDJSON |
 | Timestamps | ✅ WordBoundary | ✅ WordBoundary |
 | Max request time | 30s (Workers limit) | Unlimited |
+| DRM token | Web Crypto API | `edge_tts` built-in |
 
-**Recommendation:** Use CF Worker as primary (lower latency, no maintenance), Python server as fallback (custom domain, no Workers limits).
+**Recommendation**: Use CF Worker as primary (lower latency, no maintenance), Python server as fallback (custom domain, no Workers limits).
 
-## Available Voices
+## Word-by-Word Highlighting
 
-| Voice | Accent |
-|-------|--------|
-| `en-US-AvaNeural` | 🇺🇸 US Female |
-| `en-US-AndrewNeural` | 🇺🇸 US Male |
-| `en-GB-SoniaNeural` | 🇬🇧 UK Female |
-| `en-GB-RyanNeural` | 🇬🇧 UK Male |
-| `en-AU-WilliamNeural` | 🇦🇺 AU Male |
+Both this Worker and the Python server return identical timestamp data. See [edgetts-ws README](https://github.com/neosun100/edgetts-ws#word-by-word-highlighting-frontend-integration) for a complete frontend implementation guide.
 
-Full list: `edge-tts --list-voices`
+For a full working example, see [pte-wfd-216](https://github.com/neosun100/pte-wfd-216) which implements a 4-level fallback chain using both backends.
+
+## Development Lessons
+
+1. **`wss://` doesn't work in CF Workers** — must use `fetch('https://...', { headers: { Upgrade: 'websocket' } })` instead
+2. **Custom domains break outbound WebSocket** — this is a Cloudflare infrastructure limitation, not a code bug. Tested with both Workers Routes and AAAA `100::` records — both fail.
+3. **DRM token is required** — without `Sec-MS-GEC`, Bing returns 403. Earlier attempts without DRM failed.
+4. **Binary frame parsing** — WebSocket binary messages have a 2-byte big-endian header length prefix, then ASCII headers, then raw MP3 audio data.
+5. **`TransformStream`** is the correct way to stream responses from a Worker while processing WebSocket events asynchronously.
+
+## Companion Projects
+
+| Project | Description |
+|---------|-------------|
+| [edgetts-ws](https://github.com/neosun100/edgetts-ws) | Same API as a Python server (VPS deployment) |
+| [pte-wfd-216](https://github.com/neosun100/pte-wfd-216) | Example app with 4-level fallback + word highlighting |
 
 ## License
 
