@@ -156,6 +156,17 @@ URL: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/
 | Wall Clock 时间 | 无限制 | 无限制 |
 
 > **关于 Workers 时间限制**：CF Workers 区分 CPU 时间（实际计算耗时）和 Wall Clock 时间（包含 I/O 等待的总耗时）。我们的 Worker 大部分时间在等待 Bing WebSocket 返回数据（I/O 等待），这**不计入** CPU 时间限制。实际 CPU 消耗（DRM 哈希计算、JSON 序列化等）远低于 10ms。因此即使在免费计划上，TTS 合成也没有实际的时间限制。
+>
+> **实测 CPU 耗时**（10 词句子，42 个音频块）：
+>
+> | 操作 | 单次耗时 | 次数 | 小计 |
+> |------|---------|------|------|
+> | DRM 令牌（SHA-256） | 0.001 ms | 1 | 0.001 ms |
+> | 词时间戳解析 | 0.001 ms | 10 | 0.01 ms |
+> | 音频块 base64 编码 | 0.009 ms | 42 | 0.39 ms |
+> | **总计** | | | **~0.4 ms** |
+>
+> 仅为 10ms 免费限制的 1/25。即使是 500 词的长文章（约 2000 个音频块），CPU 时间也只有约 18ms。此外 Cloudflare 有"滚动额度"机制（rollover）——如果大部分请求都在限制以内，偶尔超出也不会报错。
 
 **建议**：CF Worker 作为主要服务（低延迟、零运维），Python 服务作为备用（支持自定义域名、无 Workers 限制）。
 

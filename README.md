@@ -161,6 +161,17 @@ Messages received:
 | Wall clock time | Unlimited | Unlimited |
 
 > **About Workers time limits**: CF Workers distinguish between CPU time (actual computation) and wall clock time (total elapsed time including I/O wait). Our Worker spends most of its time waiting for Bing's WebSocket response (I/O), which does NOT count toward the CPU limit. The actual CPU usage (DRM hash, JSON serialization) is well under 10ms. So even on the free plan, there is effectively no time limit for TTS synthesis.
+>
+> **Measured CPU time per request** (10-word sentence, 42 audio chunks):
+>
+> | Operation | Per-call | Count | Subtotal |
+> |-----------|----------|-------|----------|
+> | DRM token (SHA-256) | 0.001 ms | 1 | 0.001 ms |
+> | Word timestamp parse | 0.001 ms | 10 | 0.01 ms |
+> | Audio chunk base64 | 0.009 ms | 42 | 0.39 ms |
+> | **Total** | | | **~0.4 ms** |
+>
+> That's 1/25th of the 10ms free limit. Even a 500-word article (~2000 chunks) would only use ~18ms CPU. Cloudflare also has a "rollover" mechanism — if most requests stay under the limit, occasional overages are tolerated without errors.
 | DRM token | Web Crypto API | `edge_tts` built-in |
 
 **Recommendation**: Use CF Worker as primary (lower latency, no maintenance), Python server as fallback (custom domain, no Workers limits).
