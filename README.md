@@ -4,6 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Edge TTS](https://img.shields.io/badge/Edge_TTS-WebSocket-purple)](https://github.com/rany2/edge-tts)
 
+
+**[中文文档 / Chinese](README_CN.md)**
+
 A Cloudflare Worker that connects to Microsoft Edge TTS via WebSocket to provide text-to-speech with **word-level timestamps**. Supports both streaming (NDJSON) and non-streaming (JSON) modes. Serverless, globally distributed, zero infrastructure to maintain.
 
 ## How It Works
