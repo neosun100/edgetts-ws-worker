@@ -157,7 +157,10 @@ Messages received:
 | Custom domain | ❌ workers.dev only | ✅ Any domain |
 | Streaming | ✅ NDJSON | ✅ NDJSON |
 | Timestamps | ✅ WordBoundary | ✅ WordBoundary |
-| Max request time | 30s (Workers limit) | Unlimited |
+| CPU time limit | 10ms free / 5min paid | Unlimited |
+| Wall clock time | Unlimited | Unlimited |
+
+> **About Workers time limits**: CF Workers distinguish between CPU time (actual computation) and wall clock time (total elapsed time including I/O wait). Our Worker spends most of its time waiting for Bing's WebSocket response (I/O), which does NOT count toward the CPU limit. The actual CPU usage (DRM hash, JSON serialization) is well under 10ms. So even on the free plan, there is effectively no time limit for TTS synthesis.
 | DRM token | Web Crypto API | `edge_tts` built-in |
 
 **Recommendation**: Use CF Worker as primary (lower latency, no maintenance), Python server as fallback (custom domain, no Workers limits).

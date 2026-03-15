@@ -152,7 +152,10 @@ URL: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/
 | 自定义域名 | ❌ 仅 workers.dev | ✅ 任意域名 |
 | 流式输出 | ✅ NDJSON | ✅ NDJSON |
 | 时间戳 | ✅ WordBoundary | ✅ WordBoundary |
-| 最大请求时间 | 30 秒（Workers 限制） | 无限制 |
+| CPU 时间限制 | 免费 10ms / 付费 5min | 无限制 |
+| Wall Clock 时间 | 无限制 | 无限制 |
+
+> **关于 Workers 时间限制**：CF Workers 区分 CPU 时间（实际计算耗时）和 Wall Clock 时间（包含 I/O 等待的总耗时）。我们的 Worker 大部分时间在等待 Bing WebSocket 返回数据（I/O 等待），这**不计入** CPU 时间限制。实际 CPU 消耗（DRM 哈希计算、JSON 序列化等）远低于 10ms。因此即使在免费计划上，TTS 合成也没有实际的时间限制。
 
 **建议**：CF Worker 作为主要服务（低延迟、零运维），Python 服务作为备用（支持自定义域名、无 Workers 限制）。
 
