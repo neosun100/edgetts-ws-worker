@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.1.0] - 2026-08-03
+
+Test-hardening release. A layered test suite (161 cases, zero external deps) was added and
+immediately surfaced six real source defects, all fixed here. `src/worker.js` line coverage
+is now 95%.
+
+### Fixed
+- **voice hijacked by `model`** — `{voice:"en-US-AvaNeural", model:"tts-1-nova"}` synthesized
+  Chinese. Resolution now prefers an explicit real voice, then a voice alias, then the model
+  alias (which was previously unreachable).
+- **non-string `model` → 500** leaking `model.replace is not a function`. Now ignored safely.
+- **CORS preflight advertised `Access-Control-Allow-Headers: null`** when the request omitted
+  `Access-Control-Request-Headers` — could block cross-origin `Authorization` POSTs.
+- **`cleanText` ate markdown link parens** — `[docs](url)` became `[docs](`. Markdown now
+  runs before URL stripping.
+- **`cleanText` mangled snake_case** — `my_func_name` → `myfuncname`. Underscore emphasis is
+  now word-boundary aware.
+- **`getSsml` leaked its internal nonce** when a `<break>` attribute contained `$&`. Now uses
+  a function replacement.
+
+### Added
+- Layered test suite under `test/` (unit / integration / regression / e2e), Node's built-in
+  runner, mock upstream harness, 322-voice snapshot.
+- GitHub Actions CI (test + build + coverage) and tag-triggered deploy.
+- Community health files, animated SVG architecture diagram, full README rewrite.
+
 ## [2.0.0] - 2026-08-03
 
 生产服务 `edgetts.aws.xin`（Worker `edgetts-proxy`）此前无本地源码与版本管理。
