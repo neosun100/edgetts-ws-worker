@@ -1,0 +1,35 @@
+# GitLab CI for gitlab.aws.dev — mirrors .github/workflows/ci.yml.
+# No dependencies to install: tests use Node's built-in test runner.
+# Docker Hub node images are pullable on the internal runners.
+
+stages:
+  - test
+
+variables:
+  GIT_DEPTH: "1"
+
+test:
+  stage: test
+  image: node:22-slim
+  # Literal blocks (|) keep any ": " inside commands out of YAML's mapping parser.
+  script:
+    - |
+      node --version
+    - |
+      node --check src/worker.js
+    - |
+      npm test
+    - |
+      npm run coverage || true
+    - |
+      npm run build
+    - |
+      node --check dist/worker.js
+    - |
+      if grep -q "__test__" dist/worker.js; then
+        echo "ERROR dist/worker.js still contains __test__ export"
+        exit 1
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'

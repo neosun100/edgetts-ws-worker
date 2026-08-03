@@ -5,3 +5,4 @@ dist/
 *secrets*
 .wrangler/
 .omc/
+.playwright-mcp/
