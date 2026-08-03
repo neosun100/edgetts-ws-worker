@@ -7,6 +7,11 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test \"test/**/*.test.mjs\"",
+    "test:unit": "node --test \"test/unit/**/*.test.mjs\"",
+    "test:integration": "node --test \"test/integration/**/*.test.mjs\"",
+    "test:regression": "node --test \"test/regression/**/*.test.mjs\"",
+    "test:e2e": "node --test \"test/e2e/**/*.test.mjs\"",
+    "coverage": "node --test --experimental-test-coverage \"test/**/*.test.mjs\"",
     "check": "node --check src/worker.js && npm test",
     "deploy": "npm run build && wrangler deploy",
     "dev": "npm run build && wrangler dev"

@@ -654,4 +654,9 @@ export const __test__ = {
   getSsml,
   smartChunkText,
   cleanText,
+  // Reset the module-level token cache so tests are order-independent.
+  resetTokenCache() {
+    tokenInfo = { endpoint: null, token: null, expiredAt: null };
+    tokenRefreshInFlight = null;
+  },
 };

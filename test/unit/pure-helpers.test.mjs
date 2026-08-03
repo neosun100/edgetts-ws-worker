@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { __test__ } from '../src/worker.js';
+import { __test__ } from '../../src/worker.js';
 
 const { LIMITS, VOICE_RE, STYLE_RE, clamp, timingSafeEqual, escapeXmlAttr, getSsml, smartChunkText, cleanText } = __test__;
 
@@ -131,7 +131,7 @@ test('cleanText leaves text intact when all options are off', () => {
 test('only upstream-supported formats are offered', () => {
   // aac and flac return 400 from the cognitiveservices endpoint, so they must not be
   // in the map — otherwise they pass validation and fail opaquely upstream.
-  const html = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../../ui/index.html', import.meta.url), 'utf8');
   assert.ok(!/<option value="aac"/.test(html), 'UI must not offer aac');
   assert.ok(!/<option value="flac"/.test(html), 'UI must not offer flac');
 });
@@ -140,10 +140,10 @@ test('UI does not offer PCM as a selectable output format', () => {
   // PCM is a streaming-internal format: a bare PCM stream has no RIFF header and cannot
   // be played by <audio> in standard mode. It must not be user-selectable; streaming
   // opts into it automatically.
-  const html = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../../ui/index.html', import.meta.url), 'utf8');
   assert.ok(!/<option value="pcm"/.test(html), 'UI must not offer pcm as a format');
   // But the server must still accept it (streaming path sends response_format=pcm).
-  const worker = readFileSync(new URL('../src/worker.js', import.meta.url), 'utf8');
+  const worker = readFileSync(new URL('../../src/worker.js', import.meta.url), 'utf8');
   assert.ok(/"pcm":\s*"raw-24khz-16bit-mono-pcm"/.test(worker), 'server still maps pcm');
 });
 

@@ -102,24 +102,18 @@ voice = `x"><prosody rate="-100%">INJECTED</prosody></voice><voice name="y`
 
 ---
 
-## P1 — 建议下一步（尚未做）
+## 设计决策：保持开放访问（2026-08-03，Neo 明确）
 
-### 1. 速率限制与滥用防护 · 🟡 已知风险，主动暂缓（2026-08-03）
-**状态**：已评估，Neo 决定暂不做，先记录。
-**暴露面**：目前无任何限流。key 一旦泄漏，持有者即可跑满账号配额（Workers 请求数 /
-上游 TTS 调用），无熔断、无按 key 计量。当前唯一防线是「已绑定 API_KEY」这一层鉴权。
-**触发重评的信号**：观察到异常流量 / 账单异常 / key 有外泄迹象时，应立即启用。
-**建议方案**（届时）：
-- Cloudflare Rate Limiting 规则，或 Workers KV / Durable Object 计数
-- 按 key + IP 双维度，超限返回 429 + `Retry-After`
+本服务的定位是「让尽可能多的人能用」，因此以下两项**按设计不做**，不是待办：
 
-### 2. CORS 收紧 · 🟡 已知风险，主动暂缓（2026-08-03）
-**状态**：已评估，Neo 决定暂不做，先记录。
-**暴露面**：当前 `Access-Control-Allow-Origin: *` 且允许 `Authorization` 头。配合浏览器端
-localStorage 明文存 key（见 P1-3），任意第三方站点都能引导已在本站存过 key 的用户浏览器，
-带着该 key 向本 API 发跨源请求 —— 等价于 key 在「用户访问过恶意站点」时可被滥用。
-**触发重评的信号**：UI 面向不受信任的公网用户开放，或发生 key 被跨站滥用的迹象。
-**建议方案**（届时）：改为可配置的来源白名单（`Access-Control-Allow-Origin` 按 `Origin` 回显匹配项）。
+### ❌ 速率限制 —— 不做（by design）
+不加任何限流。已绑定的 `API_KEY` 是唯一门槛，持有 key 即可自由使用。
+（代价：key 泄漏时可被跑满配额。已知并接受。）
+
+### ❌ CORS 收紧 —— 不做（by design）
+保持 `Access-Control-Allow-Origin: *`，允许任意来源跨域调用，方便第三方前端集成。
+
+> 若未来定位改变（如商用限额），再回到「限流 + 来源白名单」方案；当前明确不做。
 
 ### 3. 前端 API key 存储
 key 明文存 `localStorage`，任何 XSS 或同源脚本可读。当前无 `v-html`，XSS 面较小，但建议：
