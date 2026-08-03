@@ -1,0 +1,48 @@
+{
+  "title": "edgetts-ws-worker · Edge TTS on Cloudflare Workers",
+  "subtitle": "OpenAI-compatible /v1/audio/speech · streaming PCM &amp; mp3/opus/wav · word-safe SSML · sliding-window concurrency · global edge",
+  "footer": "① client POST → ② Worker auth+validate → ③ smart-chunk text → ④ fetch/cache MS token → ⑤ synthesize chunks (concurrent, ordered) → stream bytes back · dashed = request in-flight",
+  "canvas": {"w": 1400, "h": 820},
+
+  "nodes": [
+    {"id": "client",  "x": 92,   "y": 430, "icon": "tile:external", "label": "Client",           "sub": "browser · app · curl"},
+    {"id": "ui",      "x": 92,   "y": 660, "icon": "tile:generic",  "label": "Built-in Web UI",  "sub": "Vue · served by Worker"},
+
+    {"id": "worker",  "x": 470,  "y": 430, "icon": "lambda",        "label": "CF Worker",        "sub": "edgetts-proxy"},
+    {"id": "auth",    "x": 470,  "y": 200, "icon": "iam",           "label": "Auth + Validate",  "sub": "API key · params"},
+    {"id": "chunk",   "x": 760,  "y": 200, "icon": "stepfunctions", "label": "Smart Chunk",      "sub": "sentence-aware split"},
+
+    {"id": "token",   "x": 1180, "y": 200, "icon": "secretsmanager","label": "MS Token",         "sub": "cached · auto-refresh"},
+    {"id": "synth",   "x": 1180, "y": 430, "icon": "connect",       "label": "MS Edge TTS",      "sub": "cognitiveservices/v1"},
+    {"id": "voices",  "x": 1180, "y": 660, "icon": "route53",       "label": "Voice List",       "sub": "322 voices · /v1/models"}
+  ],
+
+  "groups": [
+    {"kind": "region", "x": 300, "y": 120, "w": 700, "h": 700, "label": "Cloudflare Edge (global)", "lx": 318, "ly": 138},
+    {"kind": "subnet", "x": 372, "y": 156, "w": 560, "h": 108, "label": "Request pipeline", "lx": 386, "ly": 173}
+  ],
+
+  "edges": [
+    {"from": "client", "fs": "r", "to": "worker", "ts": "l", "flow": "request", "label": "POST /v1/audio/speech", "lxy": [268, 417]},
+    {"from": "ui",     "fs": "t", "to": "worker", "ts": "b", "flow": "aux", "static": true, "label": "GET /", "lxy": [300, 560], "mids": [[92, 560], [470, 560]]},
+
+    {"from": "worker", "fs": "t", "to": "auth",  "ts": "b", "flow": "request", "label": "gate", "lxy": [430, 340]},
+    {"from": "auth",   "fs": "r", "to": "chunk", "ts": "l", "flow": "request", "label": "clean text", "lxy": [612, 187]},
+    {"from": "chunk",  "fs": "b", "to": "worker","ts": "t", "flow": "reply", "label": "chunks[]", "lxy": [700, 340], "mids": [[760, 340], [510, 340]]},
+
+    {"from": "worker", "fs": "r", "to": "token", "ts": "l", "flow": "tool", "label": "sign · JWT", "lxy": [1050, 187], "mids": [[1080, 430], [1080, 200]]},
+    {"from": "worker", "fs": "r", "to": "synth", "ts": "l", "flow": "request", "label": "SSML → audio (xN, ordered)", "lxy": [820, 417]},
+    {"from": "worker", "fs": "r", "to": "voices","ts": "l", "flow": "tool", "label": "list", "lxy": [1050, 647], "mids": [[1080, 430], [1080, 660]]},
+    {"from": "token",  "fs": "b", "to": "synth", "ts": "t", "flow": "aux", "static": true}
+  ],
+
+  "journeys": [
+    {"flow": "request", "dur": 2.4, "hops": [["client","worker"],["worker","auth"],["auth","chunk"]]},
+    {"flow": "request", "dur": 2.2, "hops": [["worker","synth"]]},
+    {"flow": "reply", "dur": 2.8, "reverse": true, "hops": [["client","worker"],["worker","synth"]]},
+    {"flow": "tool", "dur": 2.0, "hops": [["worker","token"]]}
+  ],
+
+  "steps": [["client","worker",1],["worker","auth",2],["auth","chunk",3],["worker","token",4],["worker","synth",5]],
+  "legend": ["request","reply","tool","aux"]
+}
