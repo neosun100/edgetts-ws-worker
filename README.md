@@ -1,4 +1,8 @@
-# edgetts-ws-worker
+<p align="center">
+  <img src="docs/logo.svg" width="128" height="128" alt="edgetts-ws-worker logo"/>
+</p>
+
+<h1 align="center">edgetts-ws-worker</h1>
 
 [![CI](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
@@ -27,6 +31,14 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
 - 🌍 **Global edge** — runs on Cloudflare's 300+ locations; CPU work per request is < 1 ms.
 - 🖥️ **Built-in web UI** — a Vue single-page app served by the Worker itself.
 - 🔓 **Open by design** — permissive CORS, no rate limit; gated only by an API key.
+
+## Web UI
+
+Open `/` in a browser. All 322 voices are filterable by language, region, gender, and a
+“multilingual only” toggle — or search by name / ShortName. Each voice shows its full
+`ShortName` with a one-click copy button, so it drops straight into an API call.
+
+![Web UI — voice picker](docs/screenshots/ui-voice-picker.png)
 
 ## Quick start
 

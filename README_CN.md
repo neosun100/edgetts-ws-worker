@@ -1,4 +1,8 @@
-# edgetts-ws-worker
+<p align="center">
+  <img src="docs/logo.svg" width="128" height="128" alt="edgetts-ws-worker logo"/>
+</p>
+
+<h1 align="center">edgetts-ws-worker</h1>
 
 [![CI](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
@@ -24,6 +28,13 @@ API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。�
 - 🌍 **全球边缘** —— 跑在 Cloudflare 300+ 节点，单请求 CPU < 1ms。
 - 🖥️ **内置 Web UI** —— Worker 自身托管的 Vue 单页应用。
 - 🔓 **开放设计** —— 宽松 CORS、不限流；仅用 API key 作门槛。
+
+## Web 界面
+
+浏览器打开 `/`。322 个音色可按语言、地区、性别、「仅多语言」逐层筛选，也可直接搜名字 /
+ShortName。每个音色都展示完整 `ShortName` 并带一键复制，方便直接粘进 API 调用。
+
+![Web 界面 — 音色选择器](docs/screenshots/ui-voice-picker.png)
 
 ## 快速开始
 

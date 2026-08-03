@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="edgetts-ws-worker logo">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6ee7b7"/>
+      <stop offset="55%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded brand tile -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- soundwave: streaming audio, left-to-right, rising then settling -->
+  <g fill="#fff" stroke="none">
+    <rect x="96"  y="226" width="26" height="60"  rx="13" opacity="0.70"/>
+    <rect x="142" y="186" width="26" height="140" rx="13" opacity="0.80"/>
+    <rect x="188" y="136" width="26" height="240" rx="13" opacity="0.92"/>
+    <rect x="234" y="96"  width="26" height="320" rx="13"/>
+    <rect x="280" y="156" width="26" height="200" rx="13" opacity="0.92"/>
+    <rect x="326" y="206" width="26" height="100" rx="13" opacity="0.80"/>
+    <rect x="372" y="176" width="26" height="160" rx="13" opacity="0.70"/>
+  </g>
+
+  <!-- play glyph: the "speak" action, tucked into the trailing whitespace -->
+  <circle cx="404" cy="352" r="42" fill="#fff" opacity="0.95"/>
+  <polygon points="392,332 392,372 424,352" fill="#4f46e5"/>
+</svg>

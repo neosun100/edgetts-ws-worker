@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.2.0] - 2026-08-04
+
+### Added
+- **Voice picker overhaul** — the 322 voices are now filterable by search / language /
+  region / gender / “multilingual only”, shown as a card list with each voice's full
+  `ShortName` + one-click copy (for pasting into API calls). All voices remain selectable.
+- Project **logo** (`docs/logo.svg`) and a **Web UI screenshot** in the READMEs.
+- **GitLab CI** (`.gitlab-ci.yml`) mirroring the GitHub Actions pipeline; GitLab is the
+  primary CI, GitHub a private backup.
+
+### Fixed
+- Multilingual voices were indistinguishable in the old dropdown — the display name
+  stripped the word “Multilingual”, colliding en-US Ava/Andrew/Brian/Emma with their
+  single-language namesakes. They now carry a 🌏 badge and are filterable.
+
 ## [2.1.0] - 2026-08-03
 
 Test-hardening release. A layered test suite (161 cases, zero external deps) was added and
