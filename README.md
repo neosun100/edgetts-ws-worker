@@ -1,201 +1,146 @@
 # edgetts-ws-worker
 
+[![CI](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
+[![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Edge TTS](https://img.shields.io/badge/Edge_TTS-WebSocket-purple)](https://github.com/rany2/edge-tts)
 
+**[中文文档 / Chinese](README_CN.md)** · **[Roadmap](ROADMAP.md)** · **[Changelog](CHANGELOG.md)**
 
-**[中文文档 / Chinese](README_CN.md)**
+A single Cloudflare Worker that turns Microsoft Edge / Azure TTS into a fast,
+**OpenAI-compatible** text-to-speech API — with true streaming playback, 322 voices,
+a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier friendly.
 
-A Cloudflare Worker that connects to Microsoft Edge TTS via WebSocket to provide text-to-speech with **word-level timestamps**. Supports both streaming (NDJSON) and non-streaming (JSON) modes. Serverless, globally distributed, zero infrastructure to maintain.
+> **Live:** [edgetts.aws.xin](https://edgetts.aws.xin) · try the web UI or `POST /v1/audio/speech`.
 
-## How It Works
+![Architecture](docs/architecture.svg)
 
-```
-Client POST → CF Worker (edge) → Bing TTS WebSocket → WordBoundary + audio
-                                                              ↓
-                                                   JSON or NDJSON stream → Client
-```
+## Why
 
-The Worker implements the full Edge TTS WebSocket protocol from scratch (no external libraries):
-1. **DRM token generation** (`Sec-MS-GEC`) — SHA-256 hash of Windows file time + TrustedClientToken
-2. **Chrome fingerprint headers** — Origin, User-Agent, Cookie (MUID) mimicking Edge browser extension
-3. **SSML message framing** — speech.config + ssml messages over WebSocket
-4. **Binary audio parsing** — extracts audio data from WebSocket binary frames (2-byte header length prefix)
+- 🎙️ **322 voices, 40+ languages** — every Microsoft neural voice, including multilingual ones.
+- ⚡ **True streaming** — streams raw PCM so playback starts on the first chunk and never
+  cuts off mid-sentence (container formats like MP3 can't be played incrementally — see
+  [the streaming note](#streaming)).
+- 🧩 **OpenAI-compatible** — `POST /v1/audio/speech`, drop-in for the OpenAI TTS shape.
+- 🚀 **Concurrent synthesis** — long text is sentence-chunked and synthesized with a
+  sliding-window concurrency, then streamed back in order (4×+ faster on long input).
+- 🌍 **Global edge** — runs on Cloudflare's 300+ locations; CPU work per request is < 1 ms.
+- 🖥️ **Built-in web UI** — a Vue single-page app served by the Worker itself.
+- 🔓 **Open by design** — permissive CORS, no rate limit; gated only by an API key.
 
-## ⚠️ Critical: Custom Domain Limitation
+## Quick start
 
-> **Outbound WebSocket connections from Cloudflare Workers ONLY work on the default `*.workers.dev` domain.**
->
-> Custom domains via Workers Routes or AAAA `100::` records will fail with `"WebSocket upgrade failed"` because Cloudflare's proxy layer interferes with the outbound WebSocket handshake to Bing.
-
-| Domain Type | Outbound WebSocket | Status |
-|-------------|-------------------|--------|
-| `*.workers.dev` | ✅ Works | **Use this** |
-| Custom domain (Workers Route) | ❌ Fails | Do not use |
-| Custom domain (AAAA `100::`) | ❌ Fails | Do not use |
-
-This was discovered during development after multiple failed attempts. The Worker code itself is correct — the issue is at the Cloudflare infrastructure level when routing through custom domains.
-
-**Workaround**: Use the `*.workers.dev` URL directly from your frontend. If you need a custom domain, use the [edgetts-ws](https://github.com/neosun100/edgetts-ws) Python server instead.
-
-## Features
-
-- 🎯 **Word-level timestamps** — precise offset + duration in milliseconds
-- ⚡ **Streaming mode** — NDJSON for low-latency, real-time applications
-- 📦 **Non-streaming mode** — single JSON response
-- 🌍 **Global edge** — runs on Cloudflare's 300+ edge locations
-- 🔐 **DRM token** — auto-generates `Sec-MS-GEC` token via Web Crypto API
-- 🆓 **Free tier** — 100K requests/day on Workers free plan
-- 🌐 **CORS enabled** — ready for browser frontends
-
-## Quick Start
+### Use the hosted instance
 
 ```bash
-# Deploy with Wrangler CLI
-npx wrangler deploy worker.js --name edgetts-ws-worker --compatibility-date 2024-12-13
+curl -X POST https://edgetts.aws.xin/v1/audio/speech \
+  -H 'Authorization: Bearer YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"Hello from the edge!","voice":"en-US-AvaNeural"}' \
+  --output speech.mp3
 ```
 
-Or copy `worker.js` into the [Cloudflare Dashboard](https://dash.cloudflare.com/?to=/:account/workers) editor.
+### Deploy your own
+
+```bash
+git clone https://github.com/neosun100/edgetts-ws-worker
+cd edgetts-ws-worker
+npm run build                    # bundles ui/ + src/ → dist/worker.js
+npx wrangler secret put API_KEY  # set your key (or set ALLOW_ANONYMOUS=true to run open)
+npx wrangler deploy
+```
+
+No dependencies to install — the build and tests use only Node's built-ins.
 
 ## API
 
 ### `POST /v1/audio/speech`
 
-**100% API-compatible** with [edgetts-ws](https://github.com/neosun100/edgetts-ws) (the Python server). They are interchangeable.
-
-**Request:**
-
-```json
+```jsonc
 {
-  "input": "The celebrated theory is still the source of great controversy.",
-  "voice": "en-US-AvaNeural",
-  "speed": 0.8,
-  "stream": true
+  "input": "The text to speak.",   // required, ≤ 50000 chars
+  "voice": "en-US-AvaNeural",       // or an OpenAI alias: alloy/echo/fable/onyx/nova/shimmer
+  "speed": 1.0,                      // 0.25–4.0
+  "pitch": 1.0,                      // 0.5–1.5
+  "style": "general",               // expression style
+  "response_format": "mp3",         // mp3 | opus | wav  (pcm is used internally for streaming)
+  "stream": false,                   // true → raw audio stream
+  "cleaning_options": { }            // strip markdown/emoji/urls/etc. before synthesis
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `input` | string | *(required)* | Text to synthesize |
-| `voice` | string | `en-US-AvaNeural` | Edge TTS voice name |
-| `speed` | number | `1.0` | Playback speed (0.5–2.0) |
-| `stream` | boolean | `false` | Enable NDJSON streaming |
+Returns the audio bytes with the matching `Content-Type` (`audio/mpeg`, `audio/webm`,
+`audio/wav`). On error, a JSON body `{ "error": { message, code, type } }` with a precise
+`code` (e.g. `invalid_voice`, `invalid_response_format`, `input_too_long`).
 
-### Non-Streaming Response (`stream: false`)
+<a name="streaming"></a>
+#### Streaming
 
-```json
-{
-  "audio": "<base64-encoded MP3>",
-  "content_type": "audio/mpeg",
-  "timestamps": [
-    { "text": "The", "offset": 100, "duration": 218.75 },
-    { "text": "celebrated", "offset": 334.375, "duration": 750 }
-  ]
-}
+Set `stream: true`. The server streams **raw PCM** regardless of `response_format`, because
+container formats (MP3/Opus/WAV) can't be decoded incrementally — a partial MP3 blob plays
+as a short *complete* clip and stops. The bundled web UI plays streamed PCM through the Web
+Audio API on a continuous timeline, so audio starts immediately and never truncates. For
+non-streaming requests you get a normal MP3/Opus/WAV file.
+
+### `GET /v1/models` · `GET /v1/models/public`
+
+Lists the available voices (322) in an OpenAI-models-like shape. Query filters:
+`?neural=true`, `?multilingual=true`.
+
+### `GET /`
+
+Serves the built-in web UI.
+
+## Formats
+
+| `response_format` | Content-Type | Streaming | Notes |
+|---|---|---|---|
+| `mp3` | audio/mpeg | non-stream | default, best compatibility |
+| `opus` | audio/webm | non-stream | high compression |
+| `wav` | audio/wav | non-stream | lossless, large |
+| `pcm` | audio/pcm | **stream** | used automatically for streaming; not a UI option |
+
+> AAC and FLAC are **not** supported — the upstream endpoint rejects them with a 400.
+
+## Configuration
+
+| Var | Type | Purpose |
+|---|---|---|
+| `API_KEY` | secret | Bearer token required for `/v1/audio/speech`. **Without it the Worker returns 503** rather than serving unauthenticated traffic. |
+| `ALLOW_ANONYMOUS` | var | Set to `"true"` to intentionally run open (no key). |
+
+## Development
+
+```bash
+npm test              # unit + integration + regression (Node's built-in runner, zero deps)
+npm run test:unit     # one layer
+npm run coverage      # with line coverage
+npm run build         # ui/ + src/ → dist/worker.js
+npm run dev           # wrangler dev
 ```
 
-### Streaming Response (`stream: true`)
+See [CONTRIBUTING.md](CONTRIBUTING.md). Tests are layered under `test/` (unit / integration
+/ regression / e2e); handler tests run against a mock upstream, so the suite is offline and
+deterministic. E2E tests hit the real service and are skipped unless `EDGETTS_E2E=1`.
 
-```jsonl
-{"type":"word","text":"The","offset":100,"duration":218.75}
-{"type":"word","text":"celebrated","offset":334.375,"duration":750}
-{"type":"audio","data":"<base64 MP3 chunk>"}
-{"type":"done"}
-```
+## How it works
 
-All timestamps are in milliseconds. Both modes return identical timestamp data — the only difference is delivery method.
+1. **Auth + validate** — checks the API key (constant-time), then validates every
+   parameter against explicit limits, returning a precise error code on any mismatch.
+2. **Clean + chunk** — optional text cleaning (markdown/emoji/urls), then sentence-aware
+   chunking so no single request exceeds the upstream limit.
+3. **Token** — fetches and caches a Microsoft speech token (JWT), refreshing before expiry;
+   concurrent refreshes are coalesced into one.
+4. **Synthesize** — each chunk becomes an SSML request (voice/style/prosody safely escaped);
+   chunks run with sliding-window concurrency and stream back **in order**, with retries on
+   transient upstream failures.
 
-## DRM Token Generation
+## Companion & legacy
 
-The Worker implements Microsoft's `Sec-MS-GEC` algorithm using Web Crypto API:
-
-```
-1. Unix timestamp (seconds) + 11644473600 (Windows epoch offset)
-2. Round down to nearest 300 seconds (5 minutes)
-3. Multiply by 10^7 (convert to 100-nanosecond intervals)
-4. Concatenate with TrustedClientToken string
-5. SHA-256 hash → uppercase hex string
-```
-
-This token is passed as a URL parameter on the WebSocket connection.
-
-## WebSocket Connection Details
-
-```
-URL: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1
-     ?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4
-     &ConnectionId={uuid}
-     &Sec-MS-GEC={drm_token}
-     &Sec-MS-GEC-Version=1-143.0.3650.75
-
-Headers:
-  Upgrade: websocket
-  Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold
-  User-Agent: Mozilla/5.0 ... Chrome/143.0.0.0 ... Edg/143.0.0.0
-  Cookie: muid={random_hex};
-
-Messages sent:
-  1. speech.config (JSON) — output format + metadata options
-  2. ssml (XML) — voice, rate, text wrapped in SSML
-
-Messages received:
-  - Text: audio.metadata (WordBoundary JSON) or turn.end
-  - Binary: audio data (2-byte header length prefix + header + MP3 data)
-```
-
-> **Important**: CF Workers use `fetch()` with `https://` URL + `Upgrade: websocket` header, NOT `wss://` URL. The `wss://` scheme causes `"Fetch API cannot load"` errors.
-
-## Comparison with edgetts-ws (Python)
-
-| Feature | edgetts-ws-worker (CF) | edgetts-ws (Python) |
-|---------|----------------------|---------------------|
-| Runtime | Cloudflare Workers | Python + aiohttp |
-| WebSocket library | From scratch (fetch + Upgrade) | `edge_tts` library |
-| Hosting | Serverless (free tier) | VPS required |
-| Latency | Global edge (~50ms) | Single location |
-| Custom domain | ❌ workers.dev only | ✅ Any domain |
-| Streaming | ✅ NDJSON | ✅ NDJSON |
-| Timestamps | ✅ WordBoundary | ✅ WordBoundary |
-| CPU time limit | 10ms free / 5min paid | Unlimited |
-| Wall clock time | Unlimited | Unlimited |
-
-> **About Workers time limits**: CF Workers distinguish between CPU time (actual computation) and wall clock time (total elapsed time including I/O wait). Our Worker spends most of its time waiting for Bing's WebSocket response (I/O), which does NOT count toward the CPU limit. The actual CPU usage (DRM hash, JSON serialization) is well under 10ms. So even on the free plan, there is effectively no time limit for TTS synthesis.
->
-> **Measured CPU time per request** (10-word sentence, 42 audio chunks):
->
-> | Operation | Per-call | Count | Subtotal |
-> |-----------|----------|-------|----------|
-> | DRM token (SHA-256) | 0.001 ms | 1 | 0.001 ms |
-> | Word timestamp parse | 0.001 ms | 10 | 0.01 ms |
-> | Audio chunk base64 | 0.009 ms | 42 | 0.39 ms |
-> | **Total** | | | **~0.4 ms** |
->
-> That's 1/25th of the 10ms free limit. Even a 500-word article (~2000 chunks) would only use ~18ms CPU. Cloudflare also has a "rollover" mechanism — if most requests stay under the limit, occasional overages are tolerated without errors.
-| DRM token | Web Crypto API | `edge_tts` built-in |
-
-**Recommendation**: Use CF Worker as primary (lower latency, no maintenance), Python server as fallback (custom domain, no Workers limits).
-
-## Word-by-Word Highlighting
-
-Both this Worker and the Python server return identical timestamp data. See [edgetts-ws README](https://github.com/neosun100/edgetts-ws#word-by-word-highlighting-frontend-integration) for a complete frontend implementation guide.
-
-For a full working example, see [pte-wfd-216](https://github.com/neosun100/pte-wfd-216) which implements a 4-level fallback chain using both backends.
-
-## Development Lessons
-
-1. **`wss://` doesn't work in CF Workers** — must use `fetch('https://...', { headers: { Upgrade: 'websocket' } })` instead
-2. **Custom domains break outbound WebSocket** — this is a Cloudflare infrastructure limitation, not a code bug. Tested with both Workers Routes and AAAA `100::` records — both fail.
-3. **DRM token is required** — without `Sec-MS-GEC`, Bing returns 403. Earlier attempts without DRM failed.
-4. **Binary frame parsing** — WebSocket binary messages have a 2-byte big-endian header length prefix, then ASCII headers, then raw MP3 audio data.
-5. **`TransformStream`** is the correct way to stream responses from a Worker while processing WebSocket events asynchronously.
-
-## Companion Projects
-
-| Project | Description |
-|---------|-------------|
-| [edgetts-ws](https://github.com/neosun100/edgetts-ws) | Same API as a Python server (VPS deployment) |
-| [pte-wfd-216](https://github.com/neosun100/pte-wfd-216) | Example app with 4-level fallback + word highlighting |
+- `legacy/worker-ndjson.js` — the original WebSocket + NDJSON variant with **word-level
+  timestamps** (`WordBoundary`). Kept because downstream projects use it; see [ROADMAP](ROADMAP.md)
+  for the plan to merge timestamp support into the main worker.
+- [edgetts-ws](https://github.com/neosun100/edgetts-ws) — the same idea as a Python server.
 
 ## License
 

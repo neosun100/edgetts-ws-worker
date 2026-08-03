@@ -1,190 +1,134 @@
 # edgetts-ws-worker
 
+[![CI](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
+[![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Edge TTS](https://img.shields.io/badge/Edge_TTS-WebSocket-purple)](https://github.com/rany2/edge-tts)
 
-**[中文文档](README_CN.md)**
+**[English](README.md)** · **[路线图](ROADMAP.md)** · **[更新日志](CHANGELOG.md)**
 
-一个 Cloudflare Worker，通过 WebSocket 连接微软 Edge TTS，提供带**逐词时间戳**的文字转语音服务。支持流式（NDJSON）和非流式（JSON）两种模式。无服务器架构，全球边缘分发，零运维。
+一个 Cloudflare Worker，把微软 Edge / Azure TTS 封装成一套**兼容 OpenAI** 的语音合成
+API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。无服务器、全球边缘、免费额度友好。
 
-## 工作原理
+> **在线服务：** [edgetts.aws.xin](https://edgetts.aws.xin) —— 直接用网页，或 `POST /v1/audio/speech`。
 
-```
-客户端 POST → CF Worker（边缘节点）→ Bing TTS WebSocket → WordBoundary + 音频
-                                                                ↓
-                                                     JSON 或 NDJSON 流 → 客户端
-```
+![架构图](docs/architecture.svg)
 
-本 Worker 从零实现了完整的 Edge TTS WebSocket 协议（不依赖任何外部库）：
-1. **DRM 令牌生成**（`Sec-MS-GEC`）— 使用 Web Crypto API 计算 Windows 文件时间 + TrustedClientToken 的 SHA-256 哈希
-2. **Chrome 指纹伪装** — Origin、User-Agent、Cookie（MUID）模拟 Edge 浏览器扩展
-3. **SSML 消息封装** — speech.config + ssml 消息通过 WebSocket 发送
-4. **二进制音频解析** — 从 WebSocket 二进制帧中提取音频数据（2 字节头部长度前缀）
+## 特性
 
-## ⚠️ 重要限制：自定义域名不可用
-
-> **Cloudflare Workers 的出站 WebSocket 连接只能在默认的 `*.workers.dev` 域名上工作。**
->
-> 通过 Workers Routes 或 AAAA `100::` 记录绑定的自定义域名会失败，返回 `"WebSocket upgrade failed"`。这是因为 Cloudflare 的代理层会干扰 Worker 向 Bing 发起的出站 WebSocket 握手。
-
-| 域名类型 | 出站 WebSocket | 状态 |
-|---------|---------------|------|
-| `*.workers.dev` | ✅ 正常 | **请使用这个** |
-| 自定义域名（Workers Route） | ❌ 失败 | 不要使用 |
-| 自定义域名（AAAA `100::`） | ❌ 失败 | 不要使用 |
-
-**原因分析**：当请求通过自定义域名进入时，会经过 Cloudflare 的代理层（处理 DNS、SSL、WAF、缓存等），然后才路由到 Worker。这个代理层会干扰 Worker 内部发起的出站 WebSocket 升级请求。而 `workers.dev` 域名直接执行 Worker 代码，不经过这层代理。
-
-**解决方案**：前端直接使用 `*.workers.dev` URL。如果必须使用自定义域名，请使用 [edgetts-ws](https://github.com/neosun100/edgetts-ws)（Python 服务器版本）。
-
-## 功能特性
-
-- 🎯 **逐词时间戳** — 精确的偏移量 + 持续时间（毫秒）
-- ⚡ **流式模式** — NDJSON 实时推送，适用于低延迟场景
-- 📦 **非流式模式** — 单次 JSON 响应
-- 🌍 **全球边缘** — 运行在 Cloudflare 300+ 个边缘节点
-- 🔐 **DRM 令牌** — 使用 Web Crypto API 自动生成 `Sec-MS-GEC` 令牌
-- 🆓 **免费额度** — Workers 免费计划每天 100K 请求
-- 🌐 **CORS 支持** — 可直接从浏览器前端调用
+- 🎙️ **322 个音色，40+ 语言** —— 微软全部神经网络音色，含多语言音色。
+- ⚡ **真流式** —— 流式下传裸 PCM，首个分块即可开播且不会中途截断（MP3 等容器格式无法
+  边收边播，详见[流式说明](#流式)）。
+- 🧩 **兼容 OpenAI** —— `POST /v1/audio/speech`，可直接替换 OpenAI TTS。
+- 🚀 **并发合成** —— 长文本按句分块，滑动窗口并发合成后**保序**下传（长文本 4×+ 提速）。
+- 🌍 **全球边缘** —— 跑在 Cloudflare 300+ 节点，单请求 CPU < 1ms。
+- 🖥️ **内置 Web UI** —— Worker 自身托管的 Vue 单页应用。
+- 🔓 **开放设计** —— 宽松 CORS、不限流；仅用 API key 作门槛。
 
 ## 快速开始
 
+### 使用托管实例
+
 ```bash
-npx wrangler deploy worker.js --name edgetts-ws-worker --compatibility-date 2024-12-13
+curl -X POST https://edgetts.aws.xin/v1/audio/speech \
+  -H 'Authorization: Bearer YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"你好，来自边缘节点！","voice":"zh-CN-XiaoxiaoNeural"}' \
+  --output speech.mp3
 ```
 
-部署后可通过 `https://edgetts-ws-worker.<你的子域名>.workers.dev` 访问。
+### 自行部署
 
-## API 接口
+```bash
+git clone https://github.com/neosun100/edgetts-ws-worker
+cd edgetts-ws-worker
+npm run build                    # 打包 ui/ + src/ → dist/worker.js
+npx wrangler secret put API_KEY  # 设置密钥（或设 ALLOW_ANONYMOUS=true 开放访问）
+npx wrangler deploy
+```
+
+无需安装依赖 —— 构建与测试只用 Node 内置能力。
+
+## API
 
 ### `POST /v1/audio/speech`
 
-与 [edgetts-ws](https://github.com/neosun100/edgetts-ws)（Python 版本）**100% API 兼容**，可互相替换。
-
-**请求体：**
-
-```json
+```jsonc
 {
-  "input": "The celebrated theory is still the source of great controversy.",
-  "voice": "en-US-AvaNeural",
-  "speed": 0.8,
-  "stream": true
+  "input": "要合成的文本。",       // 必填，≤ 50000 字符
+  "voice": "zh-CN-XiaoxiaoNeural", // 或 OpenAI 别名：alloy/echo/fable/onyx/nova/shimmer
+  "speed": 1.0,                     // 0.25–4.0
+  "pitch": 1.0,                     // 0.5–1.5
+  "style": "general",              // 表达风格
+  "response_format": "mp3",        // mp3 | opus | wav（pcm 为流式内部使用）
+  "stream": false,                  // true → 裸音频流
+  "cleaning_options": { }           // 合成前清理 markdown/emoji/url 等
 }
 ```
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `input` | string | *（必填）* | 要合成的文本 |
-| `voice` | string | `en-US-AvaNeural` | Edge TTS 语音名称 |
-| `speed` | number | `1.0` | 播放速度（0.5–2.0） |
-| `stream` | boolean | `false` | 是否启用 NDJSON 流式输出 |
+返回对应 `Content-Type` 的音频字节。出错时返回 JSON `{ "error": { message, code, type } }`，
+`code` 精确（如 `invalid_voice`、`invalid_response_format`、`input_too_long`）。
 
-### 非流式响应（`stream: false`）
+<a name="流式"></a>
+#### 流式
 
-```json
-{
-  "audio": "<base64 编码的 MP3>",
-  "content_type": "audio/mpeg",
-  "timestamps": [
-    { "text": "The", "offset": 100, "duration": 218.75 },
-    { "text": "celebrated", "offset": 334.375, "duration": 750 }
-  ]
-}
+设 `stream: true`。无论 `response_format` 是什么，服务端都流式下传**裸 PCM** —— 因为容器
+格式（MP3/Opus/WAV）无法增量解码：部分 MP3 会被当成一个「完整的短片段」播完即停。内置
+Web UI 用 Web Audio API 在连续时间轴上播放流式 PCM，因此立即开播、绝不截断。非流式请求
+则返回正常的 MP3/Opus/WAV 文件。
+
+### `GET /v1/models` · `GET /v1/models/public`
+
+以类 OpenAI-models 结构列出全部音色（322 个）。查询过滤：`?neural=true`、`?multilingual=true`。
+
+### `GET /`
+
+返回内置 Web UI。
+
+## 输出格式
+
+| `response_format` | Content-Type | 流式 | 说明 |
+|---|---|---|---|
+| `mp3` | audio/mpeg | 非流式 | 默认，兼容性最好 |
+| `opus` | audio/webm | 非流式 | 高压缩 |
+| `wav` | audio/wav | 非流式 | 无损，体积大 |
+| `pcm` | audio/pcm | **流式** | 流式自动使用；不是 UI 选项 |
+
+> 不支持 AAC 与 FLAC —— 上游端点会返回 400 拒绝。
+
+## 配置
+
+| 变量 | 类型 | 用途 |
+|---|---|---|
+| `API_KEY` | secret | `/v1/audio/speech` 所需的 Bearer 令牌。**未设置时 Worker 返回 503**，而非无鉴权放行。 |
+| `ALLOW_ANONYMOUS` | var | 设为 `"true"` 以明确开放访问（无需 key）。 |
+
+## 开发
+
+```bash
+npm test              # 单元 + 集成 + 回归（Node 内置 runner，零依赖）
+npm run coverage      # 带行覆盖率
+npm run build         # ui/ + src/ → dist/worker.js
+npm run dev           # wrangler dev
 ```
 
-### 流式响应（`stream: true`）
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。测试分层于 `test/`（unit/integration/regression/e2e）；
+handler 测试对着 mock 上游跑，因此离线且确定。E2E 测试打真实服务，除非设 `EDGETTS_E2E=1` 否则跳过。
 
-```jsonl
-{"type":"word","text":"The","offset":100,"duration":218.75}
-{"type":"word","text":"celebrated","offset":334.375,"duration":750}
-{"type":"audio","data":"<base64 MP3 块>"}
-{"type":"done"}
-```
+## 工作原理
 
-两种模式返回的时间戳数据完全一致，唯一区别是传输方式。
+1. **鉴权 + 校验** —— 常数时间校验 API key，再逐项校验参数，任一不符返回精确错误码。
+2. **清理 + 分块** —— 可选文本清理，按句分块使单次请求不超上游上限。
+3. **令牌** —— 获取并缓存微软 speech 令牌（JWT），到期前刷新；并发刷新合并为一次。
+4. **合成** —— 每块生成 SSML 请求（voice/style/prosody 安全转义）；滑动窗口并发、保序下传，
+   上游瞬时失败自动重试。
 
-## DRM 令牌生成算法
+## 配套与遗留
 
-```
-1. 获取当前 Unix 时间戳（秒）
-2. 加上 11644473600（转换为 Windows 文件时间纪元）
-3. 向下取整到最近的 300 秒（5 分钟）
-4. 乘以 10^7（转换为 100 纳秒间隔）
-5. 与 TrustedClientToken 字符串拼接
-6. SHA-256 哈希 → 大写十六进制字符串
-```
+- `legacy/worker-ndjson.js` —— 最初的 WebSocket + NDJSON 版本，带**逐词时间戳**（`WordBoundary`）。
+  因下游项目仍在用而保留；合并时间戳能力到主 worker 的计划见 [ROADMAP](ROADMAP.md)。
+- [edgetts-ws](https://github.com/neosun100/edgetts-ws) —— 同思路的 Python 服务端版本。
 
-## WebSocket 连接细节
-
-```
-URL: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1
-     ?TrustedClientToken=6A5AA1D4EAFF4E9FB37E23D68491D6F4
-     &ConnectionId={uuid}
-     &Sec-MS-GEC={drm_token}
-     &Sec-MS-GEC-Version=1-143.0.3650.75
-
-请求头:
-  Upgrade: websocket
-  Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold
-  User-Agent: Mozilla/5.0 ... Chrome/143.0.0.0 ... Edg/143.0.0.0
-  Cookie: muid={随机十六进制};
-
-发送的消息:
-  1. speech.config（JSON）— 输出格式 + 元数据选项
-  2. ssml（XML）— 语音、语速、文本的 SSML 封装
-
-接收的消息:
-  - 文本帧: audio.metadata（WordBoundary JSON）或 turn.end
-  - 二进制帧: 音频数据（2 字节头部长度 + 头部 + MP3 数据）
-```
-
-> **重要**：CF Workers 必须使用 `fetch()` + `https://` URL + `Upgrade: websocket` 头，**不能**使用 `wss://` URL。`wss://` 会导致 `"Fetch API cannot load"` 错误。
-
-## 与 edgetts-ws（Python 版）对比
-
-| 特性 | edgetts-ws-worker（CF） | edgetts-ws（Python） |
-|------|----------------------|---------------------|
-| 运行环境 | Cloudflare Workers | Python + aiohttp |
-| WebSocket 实现 | 从零实现（fetch + Upgrade） | `edge_tts` 库 |
-| 托管方式 | 无服务器（免费额度） | 需要 VPS |
-| 延迟 | 全球边缘（~50ms） | 单一地点 |
-| 自定义域名 | ❌ 仅 workers.dev | ✅ 任意域名 |
-| 流式输出 | ✅ NDJSON | ✅ NDJSON |
-| 时间戳 | ✅ WordBoundary | ✅ WordBoundary |
-| CPU 时间限制 | 免费 10ms / 付费 5min | 无限制 |
-| Wall Clock 时间 | 无限制 | 无限制 |
-
-> **关于 Workers 时间限制**：CF Workers 区分 CPU 时间（实际计算耗时）和 Wall Clock 时间（包含 I/O 等待的总耗时）。我们的 Worker 大部分时间在等待 Bing WebSocket 返回数据（I/O 等待），这**不计入** CPU 时间限制。实际 CPU 消耗（DRM 哈希计算、JSON 序列化等）远低于 10ms。因此即使在免费计划上，TTS 合成也没有实际的时间限制。
->
-> **实测 CPU 耗时**（10 词句子，42 个音频块）：
->
-> | 操作 | 单次耗时 | 次数 | 小计 |
-> |------|---------|------|------|
-> | DRM 令牌（SHA-256） | 0.001 ms | 1 | 0.001 ms |
-> | 词时间戳解析 | 0.001 ms | 10 | 0.01 ms |
-> | 音频块 base64 编码 | 0.009 ms | 42 | 0.39 ms |
-> | **总计** | | | **~0.4 ms** |
->
-> 仅为 10ms 免费限制的 1/25。即使是 500 词的长文章（约 2000 个音频块），CPU 时间也只有约 18ms。此外 Cloudflare 有"滚动额度"机制（rollover）——如果大部分请求都在限制以内，偶尔超出也不会报错。
-
-**建议**：CF Worker 作为主要服务（低延迟、零运维），Python 服务作为备用（支持自定义域名、无 Workers 限制）。
-
-## 开发经验总结
-
-1. **`wss://` 在 CF Workers 中不可用** — 必须使用 `fetch('https://...', { headers: { Upgrade: 'websocket' } })`
-2. **自定义域名会破坏出站 WebSocket** — 这是 Cloudflare 基础设施层面的限制，不是代码 bug。测试了 Workers Routes 和 AAAA `100::` 两种方式，均失败。
-3. **DRM 令牌是必需的** — 没有 `Sec-MS-GEC`，Bing 返回 403。早期没有实现 DRM 的尝试全部失败。
-4. **二进制帧解析** — WebSocket 二进制消息有 2 字节大端序头部长度前缀，然后是 ASCII 头部，最后是原始 MP3 音频数据。
-5. **`TransformStream`** 是在 Worker 中实现流式响应的正确方式，可以在异步处理 WebSocket 事件的同时逐步输出数据。
-
-## 关联项目
-
-| 项目 | 说明 |
-|------|------|
-| [edgetts-ws](https://github.com/neosun100/edgetts-ws) | 相同 API 的 Python 服务器版本（VPS 部署） |
-| [pte-wfd-216](https://github.com/neosun100/pte-wfd-216) | 使用 4 级降级 + 逐词高亮的完整示例应用 |
-
-## 许可证
+## 许可
 
 MIT
