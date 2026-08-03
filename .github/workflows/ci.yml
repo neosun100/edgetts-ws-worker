@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # No dependencies to install — tests use Node's built-in test runner.
+      - name: Syntax check
+        run: node --check src/worker.js
+
+      - name: Unit + integration + regression tests
+        run: npm test
+
+      - name: Coverage (informational)
+        run: npm run coverage || true
+
+      - name: Build worker bundle
+        run: npm run build
+
+      - name: Verify build output is a valid module
+        run: node --check dist/worker.js
+
+      - name: Ensure test-only exports are stripped from the bundle
+        run: |
+          if grep -q "__test__" dist/worker.js; then
+            echo "::error::dist/worker.js still contains __test__ export"
+            exit 1
+          fi

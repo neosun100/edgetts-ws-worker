@@ -1,0 +1,40 @@
+name: Deploy
+
+# Deploys to Cloudflare when a version tag is pushed (e.g. v2.0.0).
+# Requires two repo secrets:
+#   CLOUDFLARE_API_TOKEN   — token with Workers Scripts:Edit on the account
+#   CLOUDFLARE_ACCOUNT_ID  — the account id
+# The Worker's own API_KEY secret is managed out-of-band (wrangler secret put API_KEY)
+# and is NOT set here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test before deploy
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

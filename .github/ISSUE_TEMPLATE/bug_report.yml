@@ -1,0 +1,44 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal request (curl / fetch) that triggers it. Redact your API key.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Streaming playback
+        - Standard generation / download
+        - Output format (mp3/opus/wav)
+        - Voice / model list
+        - Auth
+        - Web UI
+        - Deployment
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: voice
+    attributes:
+      label: Voice & format
+      placeholder: e.g. en-US-AvaNeural, response_format=mp3, stream=true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Self-hosted or the public instance? Browser / client?
