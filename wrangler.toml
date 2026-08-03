@@ -1,3 +1,15 @@
-name = "edgetts-ws-worker"
-main = "worker.js"
+# Production Worker serving https://edgetts.aws.xin
+# Deploy with: npm run deploy   (runs scripts/build.mjs first)
+name = "edgetts-proxy"
+main = "dist/worker.js"
 compatibility_date = "2024-12-13"
+
+# API_KEY is a secret and must NOT live in this file.
+#   wrangler secret put API_KEY
+# Without it the Worker returns 503 rather than silently serving unauthenticated
+# traffic. To intentionally run an open instance, set ALLOW_ANONYMOUS = "true".
+[vars]
+# ALLOW_ANONYMOUS = "true"
+
+[observability]
+enabled = true

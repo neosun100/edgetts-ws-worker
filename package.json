@@ -1,0 +1,15 @@
+{
+  "name": "edgetts-ws-worker",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker for Microsoft Edge TTS with an OpenAI-compatible API and a built-in web UI",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "check": "node --check src/worker.js && npm test",
+    "deploy": "npm run build && wrangler deploy",
+    "dev": "npm run build && wrangler dev"
+  },
+  "license": "MIT"
+}
