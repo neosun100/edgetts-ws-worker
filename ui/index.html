@@ -89,6 +89,189 @@
       color: var(--gray);
     }
 
+    /* ---------- 音色选择器 ---------- */
+
+    /* 322 个音色需要横向空间，独占一整行而不是挤在 grid 单元格里 */
+    .voice-picker {
+      grid-column: 1 / -1;
+    }
+
+    .voice-count {
+      font-size: 0.85rem;
+      color: var(--gray);
+      white-space: nowrap;
+    }
+
+    .voice-count b {
+      color: var(--primary-color);
+    }
+
+    .voice-current {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      padding: 0.6rem 0.8rem;
+      margin-bottom: 0.75rem;
+      background: linear-gradient(135deg, var(--mint-start), var(--mint-middle));
+      border: 1px solid var(--mint-accent);
+      border-radius: 8px;
+    }
+
+    .vc-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--gray);
+    }
+
+    .vc-name {
+      font-weight: 600;
+    }
+
+    .vc-id,
+    .vi-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.8rem;
+      background: rgba(255, 255, 255, 0.75);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      color: #334155;
+      user-select: all;   /* 双击即全选，方便手动复制 */
+    }
+
+    .badge-multi {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.1rem 0.4rem;
+      border-radius: 999px;
+      background: #ede9fe;
+      color: #6d28d9;
+      border: 1px solid #ddd6fe;
+      white-space: nowrap;
+    }
+
+    .copy-btn {
+      padding: 0.2rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      background: white;
+      color: var(--gray);
+      cursor: pointer;
+    }
+
+    .copy-btn:hover {
+      color: var(--primary-color);
+      border-color: var(--primary-color);
+      transform: none;
+      box-shadow: none;
+    }
+
+    .voice-filters {
+      margin-bottom: 0.6rem;
+    }
+
+    .vf-search {
+      margin-bottom: 0.5rem;
+    }
+
+    .vf-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .vf-row select {
+      flex: 1 1 150px;
+      width: auto;
+      padding: 0.5rem 0.6rem;
+      font-size: 0.9rem;
+    }
+
+    .vf-check {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.9rem;
+      font-weight: 500;
+      white-space: nowrap;
+      margin: 0;
+      cursor: pointer;
+    }
+
+    .vf-check input {
+      width: auto;
+      margin: 0;
+    }
+
+    /* 固定高度 + 滚动：列表再长也不会把页面顶下去 */
+    .voice-list {
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: white;
+    }
+
+    .voice-item {
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--light-gray);
+      cursor: pointer;
+      transition: background-color 0.15s;
+    }
+
+    .voice-item:last-child {
+      border-bottom: none;
+    }
+
+    .voice-item:hover {
+      background: var(--light-gray);
+    }
+
+    .voice-item.active {
+      background: #eef2ff;
+      box-shadow: inset 3px 0 0 var(--primary-color);
+    }
+
+    .vi-main {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .vi-radio {
+      color: var(--primary-color);
+      font-size: 0.9rem;
+    }
+
+    .vi-name {
+      font-weight: 600;
+    }
+
+    .vi-lang {
+      margin-left: auto;
+      font-size: 0.85rem;
+      color: var(--gray);
+    }
+
+    .vi-sub {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-top: 0.2rem;
+      padding-left: 1.3rem;
+    }
+
+    .voice-empty {
+      padding: 1.5rem;
+      text-align: center;
+      color: var(--gray);
+      font-size: 0.9rem;
+    }
+
     label {
       display: block;
       font-weight: 600;
@@ -563,13 +746,78 @@
       </div>
 
       <div class="grid-layout">
-        <div class="form-group">
-          <label for="voice">选择音色 (Model) - 共 {{ availableVoices.length }} 个</label>
-          <select id="voice" v-model="form.voice" @change="saveForm">
-            <option v-for="v in availableVoices" :key="v.id" :value="v.id">
-              {{ v.id }} - {{ v.name }} {{ v.genderIcon }} {{ v.langDisplay }}
-            </option>
-          </select>
+        <div class="form-group voice-picker">
+          <div class="label-with-controls">
+            <label>选择音色 (Model)</label>
+            <span class="voice-count" v-cloak>
+              已筛选 <b>{{ filteredVoices.length }}</b> / 共 {{ availableVoices.length }}
+              <button v-if="voiceFilterActive" class="clear-btn" @click="resetVoiceFilter">清除筛选</button>
+            </span>
+          </div>
+
+          <!-- 当前选中：始终可见，含完整 ShortName 供复制 -->
+          <div class="voice-current" v-if="selectedVoice" v-cloak>
+            <span class="vc-label">当前</span>
+            <span class="vc-name">
+              {{ selectedVoice.name }} {{ selectedVoice.genderIcon }}
+              <span v-if="selectedVoice.isMultilingual" class="badge-multi">🌏 多语言</span>
+            </span>
+            <code class="vc-id">{{ selectedVoice.id }}</code>
+            <button class="copy-btn" :title="'复制 ' + selectedVoice.id" @click="copyVoiceId(selectedVoice.id)">
+              {{ copiedVoiceId === selectedVoice.id ? '✓ 已复制' : '📋 复制' }}
+            </button>
+          </div>
+
+          <!-- 筛选器：逐层收窄，任一层可留空 -->
+          <div class="voice-filters">
+            <input type="text" class="vf-search" v-model="voiceFilter.q"
+                   placeholder="🔍 搜索名字 / ShortName / 语言，如 ava、multilingual、zh-CN" />
+            <div class="vf-row">
+              <select v-model="voiceFilter.lang" @change="onLangChange">
+                <option value="">全部语言</option>
+                <option v-for="o in langOptions" :key="o.name" :value="o.name">{{ o.name }} ({{ o.count }})</option>
+              </select>
+              <select v-model="voiceFilter.region">
+                <option value="">全部地区</option>
+                <option v-for="o in regionOptions" :key="o.locale" :value="o.locale">
+                  {{ o.flag }} {{ o.locale }} ({{ o.count }})
+                </option>
+              </select>
+              <select v-model="voiceFilter.gender">
+                <option value="">全部性别</option>
+                <option value="Female">♀ 女声</option>
+                <option value="Male">♂ 男声</option>
+              </select>
+              <label class="vf-check" title="多语言音色可跨语种朗读，中英混排不出戏">
+                <input type="checkbox" v-model="voiceFilter.multilingualOnly" /> 🌏 仅多语言
+              </label>
+            </div>
+          </div>
+
+          <!-- 结果列表：完整 ShortName 是一等公民，可直接复制 -->
+          <div class="voice-list" v-cloak>
+            <div v-if="filteredVoices.length === 0" class="voice-empty">
+              没有匹配的音色 —— 试试放宽条件或
+              <button class="clear-btn" @click="resetVoiceFilter">清除筛选</button>
+            </div>
+            <div v-for="v in filteredVoices" :key="v.id"
+                 :class="['voice-item', { active: v.id === form.voice }]"
+                 @click="selectVoice(v.id)">
+              <div class="vi-main">
+                <span class="vi-radio">{{ v.id === form.voice ? '●' : '○' }}</span>
+                <span class="vi-name">{{ v.name }}</span>
+                <span class="vi-gender">{{ v.genderIcon }}</span>
+                <span v-if="v.isMultilingual" class="badge-multi">🌏 多语言</span>
+                <span class="vi-lang">{{ v.langDisplay }}</span>
+              </div>
+              <div class="vi-sub">
+                <code class="vi-id">{{ v.id }}</code>
+                <button class="copy-btn" :title="'复制 ' + v.id" @click.stop="copyVoiceId(v.id)">
+                  {{ copiedVoiceId === v.id ? '✓' : '📋' }}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="form-group">
           <label>语速</label>
@@ -696,7 +944,16 @@
           downloadUrl: '', // 添加下载链接
           showDownloadBtn: false, // 控制下载按钮显示
           pauseTime: 1.0, // 停顿时间
-          availableVoices: [], // 可用语音列表
+          availableVoices: [], // 可用语音列表（始终是完整的 322 个，不做裁剪）
+          // 音色筛选器：逐层收窄 322 个音色，任一层都可留空
+          voiceFilter: {
+            q: '',            // 关键词：匹配 ShortName / 名字 / 语言
+            lang: '',         // 语言（如「英语」）
+            region: '',       // 地区 locale（如 en-US）
+            gender: '',       // Female | Male
+            multilingualOnly: false,
+          },
+          copiedVoiceId: '',  // 复制反馈
           config: {
             baseUrl: '',
             apiKey: ''
@@ -732,7 +989,67 @@
         },
         pitchDisplay() {
           return this.form.pitch.toFixed(2);
-        }
+        },
+
+        // ---- 音色筛选（逐层收窄，每层都基于「上一层已筛过」的集合统计数量）----
+
+        // 语言下拉的选项：[{name:'英语', count:62}]，按数量降序
+        langOptions() {
+          const m = new Map();
+          for (const v of this.availableVoices) {
+            const k = v.langName || v.language;
+            m.set(k, (m.get(k) || 0) + 1);
+          }
+          return [...m.entries()]
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh'));
+        },
+
+        // 地区下拉：只列出当前语言下的 locale，避免出现选了必空的组合
+        regionOptions() {
+          const m = new Map();
+          for (const v of this.availableVoices) {
+            if (this.voiceFilter.lang && (v.langName || v.language) !== this.voiceFilter.lang) continue;
+            if (!m.has(v.language)) m.set(v.language, { locale: v.language, flag: v.flag, count: 0 });
+            m.get(v.language).count++;
+          }
+          return [...m.values()].sort((a, b) => a.locale.localeCompare(b.locale));
+        },
+
+        // 最终结果：多语言优先、再按 locale、再按名字，方便扫读
+        filteredVoices() {
+          const f = this.voiceFilter;
+          const q = f.q.trim().toLowerCase();
+          return this.availableVoices
+            .filter((v) => {
+              if (f.multilingualOnly && !v.isMultilingual) return false;
+              if (f.gender && v.gender !== f.gender) return false;
+              if (f.lang && (v.langName || v.language) !== f.lang) return false;
+              if (f.region && v.language !== f.region) return false;
+              if (q && !(
+                v.id.toLowerCase().includes(q) ||
+                (v.name || '').toLowerCase().includes(q) ||
+                (v.langName || '').toLowerCase().includes(q) ||
+                v.language.toLowerCase().includes(q)
+              )) return false;
+              return true;
+            })
+            .sort((a, b) =>
+              (b.isMultilingual - a.isMultilingual) ||
+              a.language.localeCompare(b.language) ||
+              (a.name || '').localeCompare(b.name || '')
+            );
+        },
+
+        voiceFilterActive() {
+          const f = this.voiceFilter;
+          return !!(f.q.trim() || f.lang || f.region || f.gender || f.multilingualOnly);
+        },
+
+        // 当前选中的音色对象（可能被筛选条件排除在列表外，仍需展示）
+        selectedVoice() {
+          return this.availableVoices.find((v) => v.id === this.form.voice) || null;
+        },
       },
       methods: {
         async loadVoices() {
@@ -745,7 +1062,12 @@
             this.availableVoices = voices.map(v => {
               const parts = v.id.split('-');
               const langCode = parts[0] + '-' + parts[1]; // 例如: zh-CN, en-US
-              const name = parts[parts.length - 1].replace('Neural', '').replace('Multilingual', '');
+              // Multilingual voices can read text in other languages without breaking
+              // character. Stripping the word made them indistinguishable from their
+              // single-language namesakes (en-US Ava/Andrew/Brian/Emma all collided),
+              // so the badge is kept and the flag is exposed for filtering.
+              const isMultilingual = /Multilingual/.test(v.id);
+              const name = parts[parts.length - 1].replace('Multilingual', '').replace('Neural', '');
               const genderIcon = v.gender === 'Female' ? '♀' : v.gender === 'Male' ? '♂' : '?';
               
               // 语言映射
@@ -754,30 +1076,33 @@
               const i=L[v.language]||{f:'🌐',n:v.language};const langDisplay=i.f+' '+i.n;
               
               return {
-                id: v.id,
-                name: name,
+                id: v.id,              // 完整 ShortName，API 调用直接用这个
+                name: name,            // 友好名，如 Ava
                 gender: v.gender,
                 genderIcon: genderIcon,
-                language: v.language,
-                langDisplay: langDisplay
+                language: v.language,  // locale，如 en-US
+                langName: i.n,         // 语言中文名，如 英语
+                flag: i.f,             // 国旗
+                langDisplay: langDisplay,
+                isMultilingual: isMultilingual
               };
             });
           } catch (e) {
             console.warn('Failed to load voices, using default Multilingual list:', e);
             // 失败时使用 12 个 Multilingual 语音
             this.availableVoices = [
-              { id: 'en-AU-WilliamMultilingualNeural', name: 'William', genderIcon: '♂', langDisplay: '🇦🇺 英语' },
-              { id: 'en-US-AndrewMultilingualNeural', name: 'Andrew', genderIcon: '♂', langDisplay: '🇺🇸 英语' },
-              { id: 'en-US-AvaMultilingualNeural', name: 'Ava', genderIcon: '♀', langDisplay: '🇺🇸 英语' },
-              { id: 'en-US-BrianMultilingualNeural', name: 'Brian', genderIcon: '♂', langDisplay: '🇺🇸 英语' },
-              { id: 'en-US-EmmaMultilingualNeural', name: 'Emma', genderIcon: '♀', langDisplay: '🇺🇸 英语' },
-              { id: 'fr-FR-VivienneMultilingualNeural', name: 'Vivienne', genderIcon: '♀', langDisplay: '🇫🇷 法语' },
-              { id: 'fr-FR-RemyMultilingualNeural', name: 'Remy', genderIcon: '♂', langDisplay: '🇫🇷 法语' },
-              { id: 'de-DE-SeraphinaMultilingualNeural', name: 'Seraphina', genderIcon: '♀', langDisplay: '🇩🇪 德语' },
-              { id: 'de-DE-FlorianMultilingualNeural', name: 'Florian', genderIcon: '♂', langDisplay: '🇩🇪 德语' },
-              { id: 'it-IT-GiuseppeMultilingualNeural', name: 'Giuseppe', genderIcon: '♂', langDisplay: '🇮🇹 意大利语' },
-              { id: 'ko-KR-HyunsuMultilingualNeural', name: 'Hyunsu', genderIcon: '♂', langDisplay: '🇰🇷 韩语' },
-              { id: 'pt-BR-ThalitaMultilingualNeural', name: 'Thalita', genderIcon: '♀', langDisplay: '🇧🇷 葡萄牙语' }
+              { id: 'en-AU-WilliamMultilingualNeural', name: 'William', gender: 'Male', genderIcon: '♂', language: 'en-AU', langName: '英语', flag: '🇦🇺', langDisplay: '🇦🇺 英语', isMultilingual: true },
+              { id: 'en-US-AndrewMultilingualNeural', name: 'Andrew', gender: 'Male', genderIcon: '♂', language: 'en-US', langName: '英语', flag: '🇺🇸', langDisplay: '🇺🇸 英语', isMultilingual: true },
+              { id: 'en-US-AvaMultilingualNeural', name: 'Ava', gender: 'Female', genderIcon: '♀', language: 'en-US', langName: '英语', flag: '🇺🇸', langDisplay: '🇺🇸 英语', isMultilingual: true },
+              { id: 'en-US-BrianMultilingualNeural', name: 'Brian', gender: 'Male', genderIcon: '♂', language: 'en-US', langName: '英语', flag: '🇺🇸', langDisplay: '🇺🇸 英语', isMultilingual: true },
+              { id: 'en-US-EmmaMultilingualNeural', name: 'Emma', gender: 'Female', genderIcon: '♀', language: 'en-US', langName: '英语', flag: '🇺🇸', langDisplay: '🇺🇸 英语', isMultilingual: true },
+              { id: 'fr-FR-VivienneMultilingualNeural', name: 'Vivienne', gender: 'Female', genderIcon: '♀', language: 'fr-FR', langName: '法语', flag: '🇫🇷', langDisplay: '🇫🇷 法语', isMultilingual: true },
+              { id: 'fr-FR-RemyMultilingualNeural', name: 'Remy', gender: 'Male', genderIcon: '♂', language: 'fr-FR', langName: '法语', flag: '🇫🇷', langDisplay: '🇫🇷 法语', isMultilingual: true },
+              { id: 'de-DE-SeraphinaMultilingualNeural', name: 'Seraphina', gender: 'Female', genderIcon: '♀', language: 'de-DE', langName: '德语', flag: '🇩🇪', langDisplay: '🇩🇪 德语', isMultilingual: true },
+              { id: 'de-DE-FlorianMultilingualNeural', name: 'Florian', gender: 'Male', genderIcon: '♂', language: 'de-DE', langName: '德语', flag: '🇩🇪', langDisplay: '🇩🇪 德语', isMultilingual: true },
+              { id: 'it-IT-GiuseppeMultilingualNeural', name: 'Giuseppe', gender: 'Male', genderIcon: '♂', language: 'it-IT', langName: '意大利语', flag: '🇮🇹', langDisplay: '🇮🇹 意大利语', isMultilingual: true },
+              { id: 'ko-KR-HyunsuMultilingualNeural', name: 'Hyunsu', gender: 'Male', genderIcon: '♂', language: 'ko-KR', langName: '韩语', flag: '🇰🇷', langDisplay: '🇰🇷 韩语', isMultilingual: true },
+              { id: 'pt-BR-ThalitaMultilingualNeural', name: 'Thalita', gender: 'Female', genderIcon: '♀', language: 'pt-BR', langName: '葡萄牙语', flag: '🇧🇷', langDisplay: '🇧🇷 葡萄牙语', isMultilingual: true }
             ];
           }
         },
@@ -838,6 +1163,34 @@
             link.click();
             document.body.removeChild(link);
           }
+        },
+        selectVoice(id) {
+          this.form.voice = id;
+          this.saveForm();
+        },
+        // 语言变更时清掉地区，避免留下「语言=英语 + 地区=zh-CN」这种必然空集的组合
+        onLangChange() {
+          this.voiceFilter.region = '';
+        },
+        resetVoiceFilter() {
+          this.voiceFilter = { q: '', lang: '', region: '', gender: '', multilingualOnly: false };
+        },
+        async copyVoiceId(id) {
+          try {
+            await navigator.clipboard.writeText(id);
+          } catch {
+            // clipboard 在非 HTTPS/无权限时不可用，退回临时 textarea + execCommand
+            const ta = document.createElement('textarea');
+            ta.value = id;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e) { console.warn('copy failed', e); }
+            document.body.removeChild(ta);
+          }
+          this.copiedVoiceId = id;
+          setTimeout(() => { if (this.copiedVoiceId === id) this.copiedVoiceId = ''; }, 1500);
         },
         formatMimeType(fmt) {
           return {
