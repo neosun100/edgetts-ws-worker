@@ -104,14 +104,22 @@ voice = `x"><prosody rate="-100%">INJECTED</prosody></voice><voice name="y`
 
 ## P1 — 建议下一步（尚未做）
 
-### 1. 速率限制与滥用防护
-目前无任何限流。单个 key 泄漏即可跑满配额。建议：
+### 1. 速率限制与滥用防护 · 🟡 已知风险，主动暂缓（2026-08-03）
+**状态**：已评估，Neo 决定暂不做，先记录。
+**暴露面**：目前无任何限流。key 一旦泄漏，持有者即可跑满账号配额（Workers 请求数 /
+上游 TTS 调用），无熔断、无按 key 计量。当前唯一防线是「已绑定 API_KEY」这一层鉴权。
+**触发重评的信号**：观察到异常流量 / 账单异常 / key 有外泄迹象时，应立即启用。
+**建议方案**（届时）：
 - Cloudflare Rate Limiting 规则，或 Workers KV / Durable Object 计数
 - 按 key + IP 双维度，超限返回 429 + `Retry-After`
 
-### 2. CORS 收紧
-当前 `Access-Control-Allow-Origin: *` 且允许 `Authorization` 头。配合浏览器端 localStorage
-存 key 的用法，任何站点都能引导用户浏览器带 key 发请求。建议改为可配置的来源白名单。
+### 2. CORS 收紧 · 🟡 已知风险，主动暂缓（2026-08-03）
+**状态**：已评估，Neo 决定暂不做，先记录。
+**暴露面**：当前 `Access-Control-Allow-Origin: *` 且允许 `Authorization` 头。配合浏览器端
+localStorage 明文存 key（见 P1-3），任意第三方站点都能引导已在本站存过 key 的用户浏览器，
+带着该 key 向本 API 发跨源请求 —— 等价于 key 在「用户访问过恶意站点」时可被滥用。
+**触发重评的信号**：UI 面向不受信任的公网用户开放，或发生 key 被跨站滥用的迹象。
+**建议方案**（届时）：改为可配置的来源白名单（`Access-Control-Allow-Origin` 按 `Origin` 回显匹配项）。
 
 ### 3. 前端 API key 存储
 key 明文存 `localStorage`，任何 XSS 或同源脚本可读。当前无 `v-html`，XSS 面较小，但建议：
