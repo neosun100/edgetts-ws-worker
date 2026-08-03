@@ -2,6 +2,7 @@
 // Run with: npm test   (node --test, no external deps)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { __test__ } from '../src/worker.js';
 
 const { LIMITS, VOICE_RE, STYLE_RE, clamp, timingSafeEqual, escapeXmlAttr, getSsml, smartChunkText, cleanText } = __test__;
@@ -125,6 +126,14 @@ test('cleanText removes markdown, urls and emoji when asked', () => {
 test('cleanText leaves text intact when all options are off', () => {
   const input = '**keep** https://x.com 🎉';
   assert.equal(cleanText(input, {}), input);
+});
+
+test('only upstream-supported formats are offered', () => {
+  // aac and flac return 400 from the cognitiveservices endpoint, so they must not be
+  // in the map — otherwise they pass validation and fail opaquely upstream.
+  const html = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  assert.ok(!/<option value="aac"/.test(html), 'UI must not offer aac');
+  assert.ok(!/<option value="flac"/.test(html), 'UI must not offer flac');
 });
 
 test('LIMITS are internally consistent', () => {

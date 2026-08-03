@@ -591,7 +591,6 @@
             <option value="mp3">MP3 (兼容性好)</option>
             <option value="pcm">PCM (真流式播放)</option>
             <option value="opus">Opus (高压缩)</option>
-            <option value="aac">AAC</option>
             <option value="wav">WAV</option>
           </select>
           <small v-if="form.responseFormat !== 'pcm'" class="hint">
@@ -837,8 +836,7 @@
         },
         formatMimeType(fmt) {
           return {
-            mp3: 'audio/mpeg', pcm: 'audio/pcm', opus: 'audio/webm',
-            aac: 'audio/aac', flac: 'audio/flac', wav: 'audio/wav',
+            mp3: 'audio/mpeg', pcm: 'audio/pcm', opus: 'audio/webm', wav: 'audio/wav',
           }[fmt] || 'audio/mpeg';
         },
         updateStatus(message, type = 'info') {
@@ -881,7 +879,7 @@
           const requestBody = this.getRequestBody();
           requestBody.stream = isStream;
 
-          // Streaming forces PCM. Container formats (mp3/aac/opus/flac) cannot be played
+          // Streaming forces PCM. Container formats (mp3/opus) cannot be played
           // back incrementally from a Blob — a partial Blob decodes as a short complete
           // file, so <audio> fires 'ended' after the first chunk instead of continuing.
           // Raw PCM has no container, so every chunk is independently schedulable.

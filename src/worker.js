@@ -204,12 +204,14 @@ async function handleSpeechRequest(request) {
   const finalPitch = ((pitchNum - 1) * 100).toFixed(0);
   const safeConcurrency = clamp(concurrency, LIMITS.MIN_CONCURRENCY, LIMITS.MAX_CONCURRENCY, DEFAULT_CONCURRENCY);
   const safeChunkSize = clamp(chunk_size, LIMITS.MIN_CHUNK_SIZE, LIMITS.MAX_CHUNK_SIZE, DEFAULT_CHUNK_SIZE);
+  // Only formats the cognitiveservices/v1 endpoint actually accepts. aac and flac
+  // (every bitrate variant) return a bare 400 from upstream, so they are not offered —
+  // listing them would surface as an opaque "tts_generation_error" instead of a clear
+  // 400 here. Verified against the live endpoint on 2026-08-03.
   const FORMAT_MAP = {
     "mp3": "audio-24khz-48kbitrate-mono-mp3",
     "pcm": "raw-24khz-16bit-mono-pcm",
     "opus": "webm-24khz-16bit-mono-opus",
-    "aac": "audio-24khz-96kbitrate-mono-aac",
-    "flac": "audio-48khz-96kbitrate-stereo-flac",
     "wav": "riff-24khz-16bit-mono-pcm"
   };
   if (!Object.hasOwn(FORMAT_MAP, response_format)) {
@@ -224,8 +226,6 @@ async function handleSpeechRequest(request) {
     "mp3": "audio/mpeg",
     "pcm": "audio/pcm",
     "opus": "audio/webm",
-    "aac": "audio/aac",
-    "flac": "audio/flac",
     "wav": "audio/wav"
   };
   const contentType = CONTENT_TYPE_MAP[response_format];
