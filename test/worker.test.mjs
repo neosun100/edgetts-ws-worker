@@ -136,6 +136,17 @@ test('only upstream-supported formats are offered', () => {
   assert.ok(!/<option value="flac"/.test(html), 'UI must not offer flac');
 });
 
+test('UI does not offer PCM as a selectable output format', () => {
+  // PCM is a streaming-internal format: a bare PCM stream has no RIFF header and cannot
+  // be played by <audio> in standard mode. It must not be user-selectable; streaming
+  // opts into it automatically.
+  const html = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  assert.ok(!/<option value="pcm"/.test(html), 'UI must not offer pcm as a format');
+  // But the server must still accept it (streaming path sends response_format=pcm).
+  const worker = readFileSync(new URL('../src/worker.js', import.meta.url), 'utf8');
+  assert.ok(/"pcm":\s*"raw-24khz-16bit-mono-pcm"/.test(worker), 'server still maps pcm');
+});
+
 test('LIMITS are internally consistent', () => {
   assert.ok(LIMITS.MIN_SPEED < LIMITS.MAX_SPEED);
   assert.ok(LIMITS.MIN_PITCH < LIMITS.MAX_PITCH);
