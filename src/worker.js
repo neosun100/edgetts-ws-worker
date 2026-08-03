@@ -98,8 +98,12 @@ function timingSafeEqual(a, b) {
 }
 
 function handleOptions(request) {
-  const headers = makeCORSHeaders(request.headers.get("Access-Control-Request-Headers"));
-  return new Response(null, { status: 204, headers });
+  // headers.get() yields null when the header is absent, and a default parameter only
+  // kicks in for undefined — passing null straight through emitted the literal
+  // "Access-Control-Allow-Headers: null", so a preflight that didn't advertise its
+  // headers was never told Content-Type/Authorization are allowed.
+  const requested = request.headers.get("Access-Control-Request-Headers") ?? undefined;
+  return new Response(null, { status: 204, headers: makeCORSHeaders(requested) });
 }
 async function handleSpeechRequest(request) {
   if (request.method !== "POST") {
@@ -165,9 +169,20 @@ async function handleSpeechRequest(request) {
     return errorResponse("文本清理后为空，请检查 cleaning_options", 400, "input_empty_after_cleaning");
   }
 
-  // OpenAI-style aliases ("shimmer", "alloy", ...) map to real Microsoft voice names.
-  // Resolve the alias whenever one is given, not only when `voice` is absent.
-  const finalVoice = OPENAI_VOICE_MAP[voice] || OPENAI_VOICE_MAP[model.replace("tts-1-", "")] || voice;
+  // Resolve the voice with explicit intent winning over inference:
+  //   1. `voice` that is already a real Microsoft name  -> use as-is
+  //   2. `voice` that is an OpenAI alias ("shimmer", …) -> map it
+  //   3. otherwise fall back to an alias derived from `model` ("tts-1-alloy")
+  // Ordering matters: resolving the alias map first let `model` silently hijack an
+  // explicitly requested voice (e.g. voice=en-US-AvaNeural + model=tts-1-nova
+  // synthesized Chinese), and made the model-derived branch unreachable because
+  // `voice` defaults to the alias "shimmer".
+  const modelAlias = typeof model === "string" ? OPENAI_VOICE_MAP[model.replace("tts-1-", "")] : undefined;
+  const finalVoice =
+    (typeof voice === "string" && VOICE_RE.test(voice) && voice) ||
+    OPENAI_VOICE_MAP[voice] ||
+    modelAlias ||
+    voice;
   if (typeof finalVoice !== "string" || !VOICE_RE.test(finalVoice)) {
     return errorResponse(
       `无效的语音名称：${JSON.stringify(finalVoice)}。应形如 "zh-CN-XiaoxiaoNeural"`,
@@ -536,7 +551,10 @@ function getSsml(text, voiceName, rate, pitch, style) {
   const sanitizedText = processedText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   let finalText = sanitizedText;
   breakTags.forEach((tag, index) => {
-    finalText = finalText.replace(`__BREAK_${nonce}_${index}__`, tag);
+    // Function replacement so `$&`, `$1`, etc. inside a break tag's attributes are
+    // inserted literally rather than expanded as replacement patterns (which would
+    // leak the internal nonce placeholder into the outgoing SSML).
+    finalText = finalText.replace(`__BREAK_${nonce}_${index}__`, () => tag);
   });
   // voiceName/style are already whitelist-validated in handleSpeechRequest; escaping here
   // keeps getSsml safe on its own so a future caller can't reintroduce SSML injection.
@@ -585,16 +603,23 @@ function smartChunkText(text, maxChunkLength) {
 }
 function cleanText(text, options) {
   let cleanedText = text;
-  if (options.remove_urls) {
-    cleanedText = cleanedText.replace(/(https?:\/\/[^\s]+)/g, "");
-  }
+  // Markdown must run before URL stripping: the URL regex is greedy over non-space, so
+  // on `[docs](https://x.com/a)` it would swallow the closing paren and leave `[docs](`,
+  // which reads aloud as bracket noise. Extracting the link text first turns it into
+  // `docs`, and any bare URL left over is removed in the URL pass below.
   if (options.remove_markdown) {
     cleanedText = cleanedText.replace(/!\[.*?\]\(.*?\)/g, "");
     cleanedText = cleanedText.replace(/\[(.*?)\]\(.*?\)/g, "$1");
     cleanedText = cleanedText.replace(/(\*\*|__)(.*?)\1/g, "$2");
-    cleanedText = cleanedText.replace(/(\*|_)(.*?)\1/g, "$2");
+    // Single * / _ emphasis. The underscore form requires non-word boundaries so it
+    // doesn't eat delimiters inside snake_case identifiers (my_func_name → my_func_name).
+    cleanedText = cleanedText.replace(/\*(?!\s)(.+?)\*/g, "$1");
+    cleanedText = cleanedText.replace(/(^|[^\w])_(?!\s)(.+?)_(?![\w])/g, "$1$2");
     cleanedText = cleanedText.replace(/`{1,3}(.*?)`{1,3}/g, "$1");
     cleanedText = cleanedText.replace(/#{1,6}\s/g, "");
+  }
+  if (options.remove_urls) {
+    cleanedText = cleanedText.replace(/(https?:\/\/[^\s]+)/g, "");
   }
   if (options.custom_keywords) {
     const keywords = options.custom_keywords.split(",").map((k) => k.trim()).filter((k) => k);
