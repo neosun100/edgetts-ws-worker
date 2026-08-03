@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.0] - 2026-08-04
+
+### Added
+- **Live colorful spectrum visualizer** — playback (both streaming PCM and standard
+  `<audio>`) drives a shared `AnalyserNode`, drawn as a mirrored, HSL-gradient bar
+  spectrum on a canvas.
+- **Light / dark theme** — a neon deep-space dark theme with a top-right toggle,
+  persisted to localStorage and defaulting to the system preference on first visit.
+
+### Fixed
+- **build guard**: the build now rejects template literals (backtick / `${`) inside the
+  UI's inline `<script>`. Such literals get escaped when the HTML is embedded in the
+  worker's own template literal, which silently breaks the inline script so Vue never
+  mounts (page shows raw `{{ }}`). The guard fails the build with the offending line.
+
 ## [2.2.0] - 2026-08-04
 
 ### Added

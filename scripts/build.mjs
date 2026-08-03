@@ -19,6 +19,23 @@ if (!worker.includes('UI_HTML')) {
   throw new Error('src/worker.js has no UI_HTML placeholder — build would silently drop the UI');
 }
 
+// The whole UI is embedded inside a backtick template literal in the worker, so a
+// backtick or ${ inside the UI's own inline <script> gets escaped at build time and
+// reaches the browser malformed (the inline script then fails to parse and Vue never
+// mounts — the page shows raw {{ mustaches }}). Forbid them in the inline script and
+// fail loudly, pointing at the offending line. Use string concatenation instead.
+for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+  const body = m[1];
+  const idx = body.search(/`|\$\{/);
+  if (idx !== -1) {
+    const line = html.slice(0, m.index + m[0].indexOf(body) + idx).split('\n').length;
+    throw new Error(
+      `ui/index.html inline <script> uses a template literal (backtick or \${) near line ${line}. ` +
+      `That breaks once the UI is embedded in the worker's template literal — use string concatenation instead.`
+    );
+  }
+}
+
 // Strip the test-only export block so it never ships to the edge.
 const testMarker = '// Exported for unit tests; not part of the HTTP surface.';
 const workerBody = worker.includes(testMarker) ? worker.slice(0, worker.indexOf(testMarker)).trimEnd() : worker;

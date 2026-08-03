@@ -20,6 +20,43 @@
       --mint-middle: #e6fffa;
       --mint-end: #fdf2f8;
       --mint-accent: #6ee7b7;
+      /* semantic surfaces — themable */
+      --page-bg: linear-gradient(135deg, var(--mint-start) 0%, var(--mint-middle) 50%, var(--mint-end) 100%);
+      --card-bg: rgba(255, 255, 255, 0.95);
+      --panel-bg: #ffffff;
+      --input-bg: #ffffff;
+      --subtle-bg: var(--light-gray);
+      --card-shadow: 0 20px 40px rgba(0, 0, 0, 0.1), 0 8px 16px rgba(0, 0, 0, 0.06);
+      --card-border: rgba(255, 255, 255, 0.2);
+      --code-bg: rgba(255, 255, 255, 0.75);
+      --code-text: #334155;
+      --viz-bg: rgba(255, 255, 255, 0.55);
+    }
+
+    /* 暗夜霓虹主题 —— 深空底色 + 青/紫霓虹强调 */
+    [data-theme="dark"] {
+      --primary-color: #818cf8;
+      --success-color: #34d399;
+      --error-color: #f87171;
+      --warning-color: #fbbf24;
+      --light-gray: #1e293b;
+      --gray: #94a3b8;
+      --border-color: #334155;
+      --text-color: #e2e8f0;
+      --mint-accent: #22d3ee;
+      --page-bg: radial-gradient(1200px 600px at 15% -10%, #1e1b4b 0%, transparent 55%),
+                 radial-gradient(1000px 500px at 110% 20%, #0e7490 0%, transparent 50%),
+                 linear-gradient(160deg, #0b1020 0%, #0f172a 55%, #020617 100%);
+      --card-bg: rgba(17, 24, 39, 0.72);
+      --panel-bg: rgba(30, 41, 59, 0.65);
+      --input-bg: rgba(15, 23, 42, 0.85);
+      --subtle-bg: rgba(30, 41, 59, 0.55);
+      --card-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(129, 140, 248, 0.15),
+                     0 0 40px rgba(34, 211, 238, 0.08);
+      --card-border: rgba(129, 140, 248, 0.22);
+      --code-bg: rgba(2, 6, 23, 0.7);
+      --code-text: #7dd3fc;
+      --viz-bg: rgba(2, 6, 23, 0.55);
     }
 
     * {
@@ -34,12 +71,14 @@
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
         "Helvetica Neue", Arial, sans-serif;
-      background: linear-gradient(135deg, var(--mint-start) 0%, var(--mint-middle) 50%, var(--mint-end) 100%);
+      background: var(--page-bg);
+      background-attachment: fixed;
       min-height: 100vh;
       color: var(--text-color);
       line-height: 1.6;
       padding: 0;
       margin: 0;
+      transition: color 0.3s;
     }
 
     [v-cloak] {
@@ -57,12 +96,13 @@
     .container {
       max-width: 1200px;
       width: 100%;
-      background-color: rgba(255, 255, 255, 0.95);
+      background-color: var(--card-bg);
       backdrop-filter: blur(10px);
       padding: 2.5rem;
       border-radius: 20px;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1), 0 8px 16px rgba(0, 0, 0, 0.06);
-      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow: var(--card-shadow);
+      border: 1px solid var(--card-border);
+      transition: background-color 0.3s, box-shadow 0.3s, border-color 0.3s;
     }
 
     h1 {
@@ -87,6 +127,44 @@
       font-size: 0.8rem;
       line-height: 1.4;
       color: var(--gray);
+    }
+
+    .theme-toggle {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 50;
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      font-size: 1.25rem;
+      line-height: 1;
+      border-radius: 50%;
+      border: 1px solid var(--card-border);
+      background: var(--card-bg);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+      cursor: pointer;
+    }
+
+    .theme-toggle:hover {
+      transform: translateY(-2px) scale(1.05);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+    }
+
+    .viz-wrap {
+      margin-top: 1.25rem;
+      border-radius: 14px;
+      background: var(--viz-bg);
+      border: 1px solid var(--border-color);
+      overflow: hidden;
+      transition: background-color 0.3s, border-color 0.3s;
+    }
+
+    .viz-canvas {
+      display: block;
+      width: 100%;
+      height: 140px;
     }
 
     /* ---------- 音色选择器 ---------- */
@@ -132,10 +210,10 @@
     .vi-id {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 0.8rem;
-      background: rgba(255, 255, 255, 0.75);
+      background: var(--code-bg);
       padding: 0.15rem 0.4rem;
       border-radius: 4px;
-      color: #334155;
+      color: var(--code-text);
       user-select: all;   /* 双击即全选，方便手动复制 */
     }
 
@@ -156,7 +234,7 @@
       font-weight: 500;
       border: 1px solid var(--border-color);
       border-radius: 5px;
-      background: white;
+      background: var(--input-bg);
       color: var(--gray);
       cursor: pointer;
     }
@@ -212,7 +290,7 @@
       overflow-y: auto;
       border: 1px solid var(--border-color);
       border-radius: 8px;
-      background: white;
+      background: var(--panel-bg);
     }
 
     .voice-item {
@@ -231,7 +309,7 @@
     }
 
     .voice-item.active {
-      background: #eef2ff;
+      background: color-mix(in srgb, var(--primary-color) 14%, transparent);
       box-shadow: inset 3px 0 0 var(--primary-color);
     }
 
@@ -288,8 +366,9 @@
       border: 1px solid var(--border-color);
       border-radius: 8px;
       font-size: 1rem;
-      background-color: white;
-      transition: border-color 0.2s, box-shadow 0.2s;
+      background-color: var(--input-bg);
+      color: var(--text-color);
+      transition: border-color 0.2s, box-shadow 0.2s, background-color 0.3s, color 0.3s;
     }
 
     input[type="text"]:focus,
@@ -711,6 +790,10 @@
 
 <body>
   <div id="app" class="app-container">
+    <button class="theme-toggle" @click="toggleTheme" v-cloak
+            :title="theme === 'dark' ? '切换到亮色主题' : '切换到暗夜主题'">
+      {{ theme === 'dark' ? '☀️' : '🌙' }}
+    </button>
     <main class="container">
       <h1 v-cloak>{{ title }}</h1>
 
@@ -912,8 +995,14 @@
         </div>
       </div>
 
-      <audio ref="audioPlayer" controls v-show="audioSrc" v-cloak :src="audioSrc" @loadstart="onAudioLoadStart"
-        @canplay="onAudioCanPlay"></audio>
+      <!-- 动态彩色声纹：播放时实时频谱 -->
+      <div class="viz-wrap" v-show="vizActive" v-cloak>
+        <canvas ref="vizCanvas" class="viz-canvas"></canvas>
+      </div>
+
+      <audio ref="audioPlayer" controls v-show="audioSrc" v-cloak :src="audioSrc"
+        @play="onAudioPlay" @ended="stopViz" @pause="stopViz"
+        @loadstart="onAudioLoadStart" @canplay="onAudioCanPlay"></audio>
 
       <!-- 下载按钮 -->
       <div v-if="showDownloadBtn" class="download-section" v-cloak>
@@ -934,12 +1023,17 @@
       data() {
         return {
           title: 'EdgeTTS - 现代化多语言语音合成服务',
+          theme: 'light',   // 'light' | 'dark'，持久化到 localStorage
           isLoading: false,
           isStreaming: false,
           streamFormatNotice: '', // set when streaming overrode the chosen format to PCM
           streamStats: { elapsed: '0.00', size: 0, ttfb: 0, playStart: 0, show: false },
           audioContext: null,
           activeSources: [],
+          analyser: null,        // 频谱分析节点（两条播放路径共用）
+          mediaElSource: null,   // <audio> 的 MediaElementSource（每个元素只能建一次）
+          vizRAF: null,          // 可视化动画帧句柄
+          vizActive: false,      // 是否显示声纹
           audioSrc: '',
           downloadUrl: '', // 添加下载链接
           showDownloadBtn: false, // 控制下载按钮显示
@@ -1398,6 +1492,9 @@
           if (self.audioContext.state === 'suspended') {
             await self.audioContext.resume();
           }
+          // 频谱分析节点 + 启动彩色声纹
+          self.ensureAnalyser();
+          self.startViz();
           
           // 停止之前的播放
           if (self.activeSources) {
@@ -1443,12 +1540,15 @@
               
               const source = self.audioContext.createBufferSource();
               source.buffer = audioBuffer;
-              source.connect(self.audioContext.destination);
+              // 经分析节点出声（analyser 已连到 destination），驱动声纹
+              source.connect(self.analyser || self.audioContext.destination);
               
               self.activeSources.push(source);
               source.onended = () => {
                 const idx = self.activeSources.indexOf(source);
                 if (idx > -1) self.activeSources.splice(idx, 1);
+                // 流已接收完且没有在播的 source -> 收起声纹
+                if (!running && self.activeSources.length === 0) self.stopViz();
               };
               
               if (nextPlayTime < self.audioContext.currentTime - 0.1) {
@@ -1579,6 +1679,136 @@
           new Uint8Array(buffer, 44).set(pcmData);
           return new Blob([buffer], { type: 'audio/wav' });
         },
+        applyTheme() {
+          document.documentElement.setAttribute('data-theme', this.theme);
+        },
+        toggleTheme() {
+          this.theme = this.theme === 'dark' ? 'light' : 'dark';
+          this.applyTheme();
+          try { localStorage.setItem('tts_theme', this.theme); } catch (e) {}
+        },
+        loadTheme() {
+          try {
+            const saved = localStorage.getItem('tts_theme');
+            if (saved === 'dark' || saved === 'light') {
+              this.theme = saved;
+            } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+              this.theme = 'dark';   // 首次访问跟随系统偏好
+            }
+          } catch (e) {}
+          this.applyTheme();
+        },
+        // --- 动态彩色声纹 ---
+
+        ensureAudioContext() {
+          if (!this.audioContext) {
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          return this.audioContext;
+        },
+
+        // 惰性创建共享的 AnalyserNode
+        ensureAnalyser() {
+          const ctx = this.ensureAudioContext();
+          if (!this.analyser) {
+            this.analyser = ctx.createAnalyser();
+            this.analyser.fftSize = 256;          // -> 128 频段，足够顺滑又不过密
+            this.analyser.smoothingTimeConstant = 0.8;
+            this.analyser.connect(ctx.destination);
+          }
+          return this.analyser;
+        },
+
+        // 标准 <audio> 路径：把媒体元素接进分析节点（每个元素只能 createMediaElementSource 一次）
+        attachAnalyserToAudioEl() {
+          const el = this.$refs.audioPlayer;
+          if (!el) return;
+          const ctx = this.ensureAudioContext();
+          const analyser = this.ensureAnalyser();
+          if (!this.mediaElSource) {
+            this.mediaElSource = ctx.createMediaElementSource(el);
+            this.mediaElSource.connect(analyser);   // analyser 已连到 destination
+          }
+        },
+
+        startViz() {
+          this.vizActive = true;
+          const analyser = this.analyser;
+          if (!analyser) return;
+          const canvas = this.$refs.vizCanvas;
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          const bins = analyser.frequencyBinCount;   // 128
+          const freq = new Uint8Array(bins);
+          if (this.vizRAF) cancelAnimationFrame(this.vizRAF);
+
+          const draw = () => {
+            this.vizRAF = requestAnimationFrame(draw);
+            // 处理 HiDPI 与容器尺寸
+            const dpr = window.devicePixelRatio || 1;
+            const cssW = canvas.clientWidth || 600;
+            const cssH = canvas.clientHeight || 140;
+            if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+              canvas.width = Math.round(cssW * dpr);
+              canvas.height = Math.round(cssH * dpr);
+            }
+            const W = canvas.width, H = canvas.height, mid = H / 2;
+            analyser.getByteFrequencyData(freq);
+            ctx.clearRect(0, 0, W, H);
+
+            const bars = 64;                          // 只取低频一半，人声能量集中在此
+            const gap = 2 * dpr;
+            const bw = W / bars;
+            let energy = 0;
+            for (let i = 0; i < bars; i++) {
+              const v = freq[i] / 255;                // 0..1
+              energy += v;
+              const barH = Math.max(2 * dpr, v * mid * 0.95);
+              // 彩色迷彩：色相沿频段流动，振幅越大越亮越饱和
+              const hue = (i / bars) * 300 + 180;     // 青→蓝→紫→粉
+              const light = 45 + v * 35;
+              // 注意：整个 UI 被内嵌进 worker 的模板字符串，这里绝不能用反引号模板串
+              // （会被构建期转义后破坏内联脚本），一律用字符串拼接。
+              const grad = ctx.createLinearGradient(0, mid - barH, 0, mid + barH);
+              grad.addColorStop(0, 'hsla(' + hue + ',95%,' + light + '%,0.95)');
+              grad.addColorStop(0.5, 'hsla(' + (hue + 20) + ',90%,' + (light + 10) + '%,1)');
+              grad.addColorStop(1, 'hsla(' + hue + ',95%,' + light + '%,0.95)');
+              ctx.fillStyle = grad;
+              const x = i * bw + gap / 2;
+              const w = bw - gap;
+              const r = Math.min(w / 2, 6 * dpr);
+              // 上下镜像的圆角柱
+              ctx.beginPath();
+              ctx.roundRect(x, mid - barH, w, barH * 2, r);
+              ctx.fill();
+            }
+            // 中线微光
+            const avg = energy / bars;
+            ctx.fillStyle = 'hsla(190, 100%, 70%, ' + (0.15 + avg * 0.5) + ')';
+            ctx.fillRect(0, mid - dpr, W, 2 * dpr);
+          };
+          draw();
+        },
+
+        stopViz() {
+          if (this.vizRAF) { cancelAnimationFrame(this.vizRAF); this.vizRAF = null; }
+          // 淡出后隐藏
+          this.vizActive = false;
+        },
+
+        onAudioPlay() {
+          // 标准/容器格式经 <audio> 播放，接分析节点并起可视化
+          try {
+            this.attachAnalyserToAudioEl();
+            if (this.audioContext && this.audioContext.state === 'suspended') {
+              this.audioContext.resume();
+            }
+            this.startViz();
+          } catch (e) {
+            console.warn('viz attach failed:', e);
+          }
+        },
+
         onAudioLoadStart() {
           console.log('Audio loading started');
         },
@@ -1613,6 +1843,7 @@
         }
       },
       mounted() {
+        this.loadTheme();
         this.loadConfig();
         this.loadForm();
         this.loadVoices();
