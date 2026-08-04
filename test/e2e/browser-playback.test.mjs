@@ -132,13 +132,14 @@ test('the visualiser reacts to real audio (hue/sat driven by the signal)', { ski
     while (Date.now() - t0 < 1500) {
       await new Promise((r) => setTimeout(r, 100));
       const d = vm.vizDebug;
-      if (d && d.rms > 0.005) samples.push({ hue: d.hue, sat: d.sat, rms: d.rms });
+      if (d && d.rms > 0.005) samples.push({ hue: d.hue, sat: d.sat, rms: d.rms, bias: d.bias });
     }
     await p.catch(() => {});
     return {
       n: samples.length,
       hues: samples.map((s) => Math.round(s.hue)),
       sats: samples.map((s) => Math.round(s.sat)),
+      biases: samples.map((s) => s.bias),
       maxRms: samples.length ? Math.max(...samples.map((s) => s.rms)) : 0,
     };
   })()`);
@@ -148,11 +149,26 @@ test('the visualiser reacts to real audio (hue/sat driven by the signal)', { ski
   // The meaningful claim is that colour is DERIVED FROM the audio, so it must actually
   // move as the signal changes — a constant hue would mean the mapping is dead. Asserting
   // a hard-coded band would just re-encode implementation constants.
+  // These must be SEPARATE assertions. As `hueSpread > 0 || satSpread > 0` this passed
+  // even with both hue drivers (spectral centroid → hue, f0 → hue bias) replaced by a
+  // constant, because a moving saturation alone satisfied the `||`. The user would see a
+  // soundwave whose colour never tracks the voice, and the suite stayed green.
   const hueSpread = Math.max(...viz.hues) - Math.min(...viz.hues);
   const satSpread = Math.max(...viz.sats) - Math.min(...viz.sats);
   assert.ok(
-    hueSpread > 0 || satSpread > 0,
-    `colour never changed across ${viz.n} frames (hue ${viz.hues.join(',')}) — mapping is not audio-driven`
+    hueSpread > 0,
+    `hue never changed across ${viz.n} frames (hue ${viz.hues.join(',')}) — the centroid→hue mapping is dead`
+  );
+  assert.ok(
+    satSpread > 0,
+    `saturation never changed across ${viz.n} frames (sat ${viz.sats.join(',')}) — the crest→saturation mapping is dead`
+  );
+  // The f0 → hue-bias pathway is independent of the centroid, so it needs its own
+  // assertion: the fixture sweeps its fundamental, so the per-voice bias must move.
+  const biasSpread = Math.max(...viz.biases) - Math.min(...viz.biases);
+  assert.ok(
+    biasSpread > 0,
+    `hue bias never changed across ${viz.n} frames (${viz.biases.join(',')}) — the f0→hue mapping is dead`
   );
   for (const s of viz.sats) {
     assert.ok(s > 0 && s <= 100, 'saturation is a valid percentage, got ' + s);

@@ -10,6 +10,11 @@ const ANON = { ALLOW_ANONYMOUS: 'true' };
 
 async function withMock(opts, fn) {
   __test__.resetTokenCache();
+  // The voice list is cached in a module-level variable, so a warm cache from any
+  // earlier test leaks in here and makes the two degradation tests below pass for
+  // the wrong reason (they would see the real 322-voice list, not the fallback).
+  // Reset it too, matching voices-cache.test.mjs and auth-routing.test.mjs.
+  __test__.resetVoicesCache();
   const mock = installMockFetch(opts);
   try { return await fn(mock); } finally { mock.restore(); }
 }
@@ -25,33 +30,89 @@ test('oversized body is rejected with 413 before it is parsed', async () => {
       voice: 'en-US-AvaNeural',
       cleaning_options: { custom_keywords: 'x'.repeat(300 * 1024) },
     });
-    const res = await worker.fetch(
-      new Request('https://tts.test/v1/audio/speech', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      }),
-      ANON,
-      {}
-    );
+    const declared = new TextEncoder().encode(body).byteLength;
+    const request = new Request('https://tts.test/v1/audio/speech', {
+      method: 'POST',
+      // Node's Request does NOT set content-length for a string body, so without
+      // this header the declared-length fast path could never fire and this test
+      // silently exercised the actual-byte branch that the chunked test below owns.
+      headers: { 'Content-Type': 'application/json', 'content-length': String(declared) },
+      body,
+    });
+    // The fast path exists to reject before pulling the body into memory (a Worker
+    // has a 128MB ceiling), and status alone cannot tell the two branches apart —
+    // both answer 413. Reading the body is the only observable difference.
+    let bodyWasRead = false;
+    const realText = request.text.bind(request);
+    request.text = () => { bodyWasRead = true; return realText(); };
+
+    const res = await worker.fetch(request, ANON, {});
     assert.equal(res.status, 413);
     const json = await res.json();
     assert.equal(json.error.code, 'payload_too_large');
     // Error carries both the actual and the limit, per the project's error contract.
     assert.match(json.error.message, /\d+ > \d+/);
+    assert.match(
+      json.error.message,
+      new RegExp(String(declared)),
+      'the number reported must come from Content-Length, proving the fast path ran'
+    );
+    assert.equal(bodyWasRead, false, 'oversized body must be rejected before it is read');
     assert.equal(mock.calls.synth, 0, 'never reaches upstream');
   });
 });
 
-test('a body at the limit still succeeds', async () => {
+test('a body of exactly MAX_BODY_BYTES still succeeds (boundary is inclusive)', async () => {
   await withMock({}, async (mock) => {
+    // The previous version of this test sent 43 bytes — 0.016% of the limit — so the
+    // boundary was untested and `>` could be flipped to `>=` with the suite still
+    // green. Pad a field so the encoded body lands exactly on the limit.
+    const limit = __test__.LIMITS.MAX_BODY_BYTES;
+    const shell = JSON.stringify({ input: 'hello', voice: 'en-US-AvaNeural', pad: '' });
+    const body = JSON.stringify({
+      input: 'hello',
+      voice: 'en-US-AvaNeural',
+      pad: 'x'.repeat(limit - new TextEncoder().encode(shell).byteLength),
+    });
+    assert.equal(new TextEncoder().encode(body).byteLength, limit, 'fixture must sit on the limit');
+
     const res = await worker.fetch(
-      speechRequest({ input: 'hello', voice: 'en-US-AvaNeural' }),
+      new Request('https://tts.test/v1/audio/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'content-length': String(limit) },
+        body,
+      }),
       ANON,
       {}
     );
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 200, 'a body exactly at the limit is allowed');
     assert.ok(mock.calls.synth >= 1);
+  });
+});
+
+test('a body of MAX_BODY_BYTES + 1 is rejected with 413', async () => {
+  await withMock({}, async (mock) => {
+    const limit = __test__.LIMITS.MAX_BODY_BYTES;
+    const shell = JSON.stringify({ input: 'hello', voice: 'en-US-AvaNeural', pad: '' });
+    const body = JSON.stringify({
+      input: 'hello',
+      voice: 'en-US-AvaNeural',
+      pad: 'x'.repeat(limit - new TextEncoder().encode(shell).byteLength + 1),
+    });
+    assert.equal(new TextEncoder().encode(body).byteLength, limit + 1);
+
+    const res = await worker.fetch(
+      new Request('https://tts.test/v1/audio/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'content-length': String(limit + 1) },
+        body,
+      }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 413, 'one byte over the limit is rejected');
+    assert.equal((await res.json()).error.code, 'payload_too_large');
+    assert.equal(mock.calls.synth, 0);
   });
 });
 
@@ -166,6 +227,15 @@ test('/v1/models falls back to a built-in list when upstream fails', async () =>
       const models = await res.json();
       assert.ok(Array.isArray(models) && models.length > 0, 'returns fallback voices');
       assert.ok(models.every((m) => typeof m.id === 'string'));
+      // `length > 0` alone cannot tell the fallback list from the real ~322-voice
+      // list, so this test used to pass even when it received the real thing.
+      // Two properties are unique to the degraded path (see voices-cache.test.mjs):
+      assert.ok(models.length < 50, 'the fallback list is small, not the full catalogue');
+      assert.equal(
+        res.headers.get('Cache-Control'),
+        'no-store',
+        'a degraded result must not be cached for 6 hours like a real one'
+      );
     } finally {
       globalThis.fetch = realFetch;
     }

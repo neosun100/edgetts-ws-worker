@@ -104,6 +104,30 @@ test('smartChunkText splits a delimiter-only run longer than max instead of over
   for (const c of chunks) assert.ok(c.length <= 3);
 });
 
+test('smartChunkText keeps the tail of an oversized segment open to merge with what follows', () => {
+  // When a long unpunctuated run is hard-split, the final under-length slice is left in
+  // currentChunk rather than pushed, so the next segment joins it. Otherwise the tail
+  // becomes a chunk of its own and the text splits right before the punctuation, adding
+  // an upstream request and an audible pause exactly where a sentence continues.
+  //
+  // Existing tests could not see this: the round-numbered fixtures produced no tail, and
+  // the ones that did only asserted "content preserved" + "under the limit", which both
+  // splittings satisfy — only the chunk boundaries differ. So pin the boundaries.
+  assert.deepEqual(
+    smartChunkText('a'.repeat(25) + '。bbb', 10),
+    ['aaaaaaaaaa', 'aaaaaaaaaa', 'aaaaa。bbb'],
+    'the 5-char tail must absorb 。bbb instead of standing alone'
+  );
+  // An exact multiple leaves no tail, so the following segment starts a fresh chunk —
+  // the control case that proves the assertion above is about the tail, not about
+  // segments merging unconditionally.
+  assert.deepEqual(
+    smartChunkText('a'.repeat(20) + '。bbb', 10),
+    ['aaaaaaaaaa', 'aaaaaaaaaa', '。bbb'],
+    'no tail means no merge'
+  );
+});
+
 test('smartChunkText never emits an empty or whitespace-only chunk', () => {
   const text = 'a,,,   ,,,b.   .   c\n\n\nd';
   for (const max of [1, 2, 4, 7, 11]) {
