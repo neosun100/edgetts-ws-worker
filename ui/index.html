@@ -1410,13 +1410,6 @@
               custom_keywords: this.form.cleaning.customKeywords,
             },
           };
-          // opus 只能落在单个分块里（WebM 容器拼接后时间戳会归零，服务端会返回
-          // opus_requires_single_chunk）。UI 默认不传 chunk_size，于是走服务端默认 300，
-          // 任何超过 300 字的 opus 请求都会被拒 —— 对界面用户来说就是「选了 Opus 就报错」。
-          // 因此选 opus 时主动请求最大分块，让常见长度落回单块。
-          if (body.response_format === 'opus') {
-            body.chunk_size = 2000;
-          }
           return body;
         },
         async generateSpeech(isStream) {

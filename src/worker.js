@@ -350,41 +350,6 @@ async function handleSpeechRequest(request) {
   if (textChunks.length > LIMITS.MAX_CHUNKS) {
     return tooManyChunks(textChunks.length);
   }
-  // Opus 是 WebM 容器，多分块只能裸拼接成 N 个独立容器，而 WebM 的 Cluster 时间戳是
-  // 容器内相对的：拼接后每个容器都从 0 重新计时。实测 5 个容器的响应里时间戳回退 4 次，
-  // 最大 pts 只有 10.85s（单容器同样文本是 43.37s），进度条与拖动因此彻底失准。
-  //
-  // 音频本身不丢（Chrome 的 decodeAudioData 仍解出完整 43.63s，与 WAV 的 43.40s 相当），
-  // 所以这不像 WAV 那样是静默数据丢失，但时间轴坏掉仍会让人以为音频被截断。
-  //
-  // 在 Worker 里正确合并需要重写 EBML：合并 Segment、逐个重定基 Cluster 时间戳（实测
-  // 278KB / 2179 个包）、再注入顶层 Duration。这远超单请求 10ms 的 CPU 预算，风险大于收益。
-  // 因此显式拒绝，并指出可行出路：调大 chunk_size 让它落回单分块（实测 ≤2000 字符时
-  // 上游只返回 1 个容器、时间戳单调），或换 mp3/wav。
-  //
-  // 注意：这不修 `<audio>.duration === null`。那是上游 webm-24khz-16bit-mono-opus 流式封装
-  // 的固有特性 —— 单分块响应同样没有 Duration 元素，与拼接无关，Worker 层无法便宜地补上。
-  if (contentType === "audio/webm" && textChunks.length > 1) {
-    // 出路必须是**当前真的可行的**那条。已经顶到 MAX_CHUNK_SIZE 时再说「请调大 chunk_size
-    // （上限 2000）」是句无法执行的建议——用户照做也还是失败。这种时候唯一的出路是换格式
-    // 或拆分文本，就只说这个。
-    // 判据是「调到上限**够不够**」，而不是「现在有没有到上限」：文本比 MAX_CHUNK_SIZE
-    // 还长时，调大 chunk_size 也不可能落回单块，此时推荐它同样是白费一次往返。
-    const fitsAtMax = smartChunkText(cleanedInput, LIMITS.MAX_CHUNK_SIZE).length === 1;
-    const wayOut = fitsAtMax
-      ? `请把 chunk_size 调到 ${LIMITS.MAX_CHUNK_SIZE}（该文本可落进单块），或改用 ` +
-        `response_format 为 mp3 / wav。`
-      : `该文本 ${cleanedInput.length} 字符，即使 chunk_size 取上限 ` +
-        `${LIMITS.MAX_CHUNK_SIZE} 也无法落进单块：请改用 response_format 为 mp3 / wav，` +
-        `或把文本拆成多次请求（每次不超过约 ${LIMITS.MAX_CHUNK_SIZE} 字符）。`;
-    return errorResponse(
-      `opus 不支持多分块：按 chunk_size=${safeChunkSize} 会切成 ${textChunks.length} 块，` +
-        `而 WebM 容器拼接后时间戳会在每块开头归零（进度条与拖动失准）。` +
-        wayOut,
-      400,
-      "opus_requires_single_chunk"
-    );
-  }
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
   if (stream) {
     return await streamVoice(textChunks, safeConcurrency, ...ttsArgs);
@@ -592,6 +557,164 @@ async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
  * 任何一块不像 WAV（缺 RIFF/WAVE 魔数或找不到 data 块）就退回裸拼接：那说明上游换了
  * 格式，此时猜测比原样透传更危险，且降级会记进日志而不是静默发生。
  */
+// ---------------------------------------------------------------- WebM / Opus 合并
+//
+// 上游对每个分块返回一个**完整独立**的 WebM 容器。裸拼接后 `<audio>` 只认第一个容器：
+// 实测 3 容器的响应里 Chrome 报 65.14s，而文件实际含 162.91s 音频 —— 静默丢掉 60%。
+// （早前用 decodeAudioData 测得「完整」是假象：它会一路读完所有容器，而 UI 用的是
+// `<audio>`。两者结论相反时，以用户真实走的那条路径为准。另外 duration 要 seek 到
+// 超末尾才会被 Chrome 解析出来，只看 loadedmetadata 时的 null 会误判成上游特性。）
+//
+// 合并是纯字节层的，因为上游的封装恰好省掉了所有需要回填长度的元素：Segment 与 Cluster
+// 都是 UNKNOWN-size，且没有 SeekHead / Cues / 顶层 Duration。于是只需保留块 0 的头部，
+// 后续块丢掉头部、把每个 Cluster 的 Timecode 改写成绝对时间即可，没有任何 size 字段要动。
+// Timecode 固定写成 8 字节（0xE7 0x88 + uint64BE），长度恒定，父级的 UNKNOWN size 不受影响。
+//
+// 成本实测（真 workerd，45 块 / 2.7MB / 21240 个 SimpleBlock）：约 1.2ms，是 10ms CPU
+// 预算的 12%，与 concatWavBlobs 同量级。本机对 10 块 / 601KB 复测为 2.42ms，且输出的 PCM
+// 与裸拼接逐字节相同 —— 只有时间戳变了，音频无损。
+var WEBM_FRAME_MS = 20;      // 上游恒定 20ms 一帧（实测每个 SimpleBlock 的相对步长都是 20）
+var OPUS_CODEC_DELAY_MS = 10; // 加上它才能消掉 ffmpeg 的 non-monotonic dts 告警（44 -> 0）
+
+var EBML_ID = {
+  SEGMENT: 0x18538067,
+  CLUSTER: 0x1f43b675,
+  TIMECODE: 0xe7,
+  SIMPLEBLOCK: 0xa3
+};
+
+/** 读一个 EBML 变长整数。keepMarker 时返回含前导标记位的原始 ID。 */
+function readEbmlVint(b, p, keepMarker) {
+  const first = b[p];
+  if (first === undefined) return null;
+  let len = 1;
+  let mask = 0x80;
+  while (len <= 8 && !(first & mask)) {
+    mask >>= 1;
+    len++;
+  }
+  if (len > 8) return null;
+  let val = keepMarker ? first : first & (mask - 1);
+  // size 字段全 1 表示「长度未知」，这正是上游流式封装的写法。
+  let allOnes = (first & (mask - 1)) === mask - 1;
+  for (let i = 1; i < len; i++) {
+    val = val * 256 + b[p + i];
+    if (b[p + i] !== 0xff) allOnes = false;
+  }
+  return { val, len, unknown: !keepMarker && allOnes };
+}
+
+/** 定位一个分块的首个 Cluster、每个 Cluster 的 Timecode 位置，以及该块的时长。 */
+function parseWebmChunk(b) {
+  let p = 0;
+  let firstCluster = -1;
+  const clusters = [];
+  let lastAbs = -1;
+  let base = 0;
+  while (p < b.length) {
+    const id = readEbmlVint(b, p, true);
+    if (!id) break;
+    const size = readEbmlVint(b, p + id.len, false);
+    if (!size) break;
+    const body = p + id.len + size.len;
+    if (id.val === EBML_ID.SEGMENT) {
+      p = body;                                   // 进入 Segment
+      continue;
+    }
+    if (id.val === EBML_ID.CLUSTER) {
+      if (firstCluster < 0) firstCluster = p;
+      clusters.push({ start: p, headerEnd: body });
+      p = body;                                   // Cluster 也是 UNKNOWN-size，直接进入
+      continue;
+    }
+    if (id.val === EBML_ID.TIMECODE && clusters.length) {
+      let n = 0;
+      for (let i = 0; i < size.val; i++) n = n * 256 + b[body + i];
+      base = n;
+      const c = clusters[clusters.length - 1];
+      c.tcStart = p;
+      c.tcEnd = body + size.val;
+      c.tc = n;
+      p = body + size.val;
+      continue;
+    }
+    if (id.val === EBML_ID.SIMPLEBLOCK) {
+      // track 号占 1 字节 vint，随后是 int16BE 的块内相对时间戳。
+      const rel = (((b[body + 1] << 8) | b[body + 2]) << 16) >> 16;
+      lastAbs = base + rel;
+      p = body + size.val;
+      continue;
+    }
+    if (size.unknown) {
+      p = body;
+      continue;
+    }
+    p = body + size.val;
+  }
+  if (firstCluster < 0) return null;              // 不像 WebM，交给调用方降级
+  return { firstCluster, clusters, duration: lastAbs + WEBM_FRAME_MS };
+}
+
+/** Cluster Timecode 定长编码：0xE7 + 0x88(8 字节) + uint64BE，改写后长度不变。 */
+function encodeClusterTimecode(ms) {
+  const out = new Uint8Array(10);
+  out[0] = EBML_ID.TIMECODE;
+  out[1] = 0x88;
+  let v = BigInt(ms);
+  for (let i = 9; i >= 2; i--) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+}
+
+/**
+ * 把 N 个独立 WebM 容器合并成一个。任一分块解析不出 Cluster 就返回 null，
+ * 由调用方降级为裸拼接并留日志（与 concatWavBlobs 的降级方式一致）。
+ */
+function mergeWebmChunks(buffers) {
+  const parsed = [];
+  for (const buf of buffers) {
+    const bytes = new Uint8Array(buf);
+    const info = parseWebmChunk(bytes);
+    if (!info) return null;
+    parsed.push({ bytes, info });
+  }
+  const pieces = [];
+  // 块 0 的头部（EBML + Segment + Info + Tracks）原样保留，后续块的头部全部丢弃。
+  pieces.push(parsed[0].bytes.subarray(0, parsed[0].info.firstCluster));
+  let offset = 0;
+  for (const { bytes, info } of parsed) {
+    for (let i = 0; i < info.clusters.length; i++) {
+      const c = info.clusters[i];
+      const end = i + 1 < info.clusters.length ? info.clusters[i + 1].start : bytes.length;
+      pieces.push(bytes.subarray(c.start, c.headerEnd));       // Cluster ID + UNKNOWN size
+      pieces.push(encodeClusterTimecode(c.tc + offset));       // 改写成绝对时间
+      pieces.push(bytes.subarray(c.tcEnd, end));               // SimpleBlock 原样透传
+    }
+    offset += info.duration + OPUS_CODEC_DELAY_MS;
+  }
+  let total = 0;
+  for (const piece of pieces) total += piece.length;
+  const out = new Uint8Array(total);
+  let w = 0;
+  for (const piece of pieces) {
+    out.set(piece, w);
+    w += piece.length;
+  }
+  return out;
+}
+
+async function concatWebmBlobs(blobs, contentType) {
+  const buffers = await Promise.all(blobs.map((b) => b.arrayBuffer()));
+  const merged = mergeWebmChunks(buffers);
+  if (!merged) {
+    console.warn("WebM 合并：分块里找不到 Cluster，退回裸拼接");
+    return new Blob(blobs, { type: contentType });
+  }
+  return new Blob([merged], { type: contentType });
+}
+
 async function concatWavBlobs(blobs, contentType) {
   const buffers = await Promise.all(blobs.map((b) => b.arrayBuffer()));
   const parsed = [];
@@ -655,13 +778,17 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
     // WAV 是带头部的容器：裸拼接 N 个分块等于把 N 个完整 RIFF 文件首尾相接，
     // 播放器读到第一个头里的 data 长度就停了，后面全部音频被静默丢弃。默认
     // chunk_size=300，所以约 300 字符以上的输入就会触发——用户听到的是被截断的
-    // 语音，且响应是 200 + 合法 WAV，无法与正常结果区分。mp3/pcm 不受影响
-    // （前者帧自同步、后者无头部）。opus/webm 拼接后时间戳会归零，已在
-    // handleSpeechRequest 里用 opus_requires_single_chunk 提前拒绝，到不了这里。
-    const audioBody =
-      contentType === "audio/wav" && allAudioBlobs.length > 1
-        ? await concatWavBlobs(allAudioBlobs, contentType)
-        : new Blob(allAudioBlobs, { type: contentType });
+    // 语音，且响应是 200 + 合法 WAV，无法与正常结果区分。opus/webm 有同样性质的问题
+    // （`<audio>` 只认第一个容器，实测 3 容器时 65.14s / 实际 162.91s），见
+    // mergeWebmChunks。mp3/pcm 不受影响：前者帧自同步、后者无头部。
+    let audioBody;
+    if (allAudioBlobs.length > 1 && contentType === "audio/wav") {
+      audioBody = await concatWavBlobs(allAudioBlobs, contentType);
+    } else if (allAudioBlobs.length > 1 && contentType === "audio/webm") {
+      audioBody = await concatWebmBlobs(allAudioBlobs, contentType);
+    } else {
+      audioBody = new Blob(allAudioBlobs, { type: contentType });
+    }
     return new Response(audioBody, {
       headers: { "Content-Type": contentType, ...makeCORSHeaders() }
     });
@@ -995,6 +1122,8 @@ export const __test__ = {
   escapeXmlAttr,
   getSsml,
   voiceDisplayName,
+  mergeWebmChunks,
+  parseWebmChunk,
   smartChunkText,
   cleanText,
   // Reset the module-level token cache so tests are order-independent.

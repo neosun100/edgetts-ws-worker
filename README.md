@@ -139,24 +139,24 @@ Serves the built-in web UI.
 | `response_format` | Content-Type | Streaming | Notes |
 |---|---|---|---|
 | `mp3` | audio/mpeg | non-stream | default, best compatibility |
-| `opus` | audio/webm | non-stream | high compression; **single-chunk only** (see below) |
+| `opus` | audio/webm | non-stream | high compression; chunks are merged (see below) |
 | `wav` | audio/wav | non-stream | lossless, large |
 | `pcm` | audio/pcm | **stream** | used automatically for streaming; not a UI option |
 
 > AAC and FLAC are **not** supported — the upstream endpoint rejects them with a 400.
 
-**Opus needs to fit in one chunk.** WebM Cluster timestamps are container-relative, so
-concatenating one container per chunk restarts the clock at every boundary: a 5-container
-response measured 4 timestamp rewinds and a maximum pts of 10.85s where the single-container
-version reached 43.37s. The audio is all there (Chrome still decodes the full length), but
-the progress bar and seeking are wrong. Rather than ship that silently, a request that would
-split into more than one chunk returns 400 `opus_requires_single_chunk`. Raise `chunk_size`
-(up to 2000, which covers ~2000 characters) or use mp3/wav for longer text.
+**Multi-chunk Opus is merged into one WebM segment.** Each chunk arrives from upstream as
+a complete, independent container, and `<audio>` honours only the first one — measured on
+real chunks, the element reported 9.44s for a file holding 94.56s, silently losing up to 90%
+of the audio. The Worker now rewrites the per-container Cluster timestamps into one
+continuous timeline (~1.2ms for 45 chunks; the upstream muxing conveniently omits every
+length-bearing element, so no size field has to move). If a chunk is not parseable WebM the
+merge declines and the bytes are passed through unchanged, with the reason logged.
 
-Also note `<audio>.duration` is `null` for opus even with a single chunk: the upstream
-`webm-24khz-16bit-mono-opus` muxing declares no Duration and an unknown-length Segment.
-That is upstream behaviour, not something this Worker introduces. mp3 and wav both report a
-duration normally.
+Note that reading `<audio>.duration` for Opus requires seeking past the end first
+(`currentTime = 1e9`): the Segment has no declared length, so Chrome reports `null` until
+then. That is a property of the format, not of the merge — mp3 and wav report a duration
+immediately.
 
 ## Configuration
 

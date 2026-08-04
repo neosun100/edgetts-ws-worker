@@ -205,57 +205,17 @@ test('mp3 and pcm are still concatenated as raw bytes', async () => {
 });
 
 // ----------------------------------------------------------------- opus / WebM
-// Opus is the other container format, and it fails differently from WAV — which is why
-// the same `new Blob([...])` needed a different remedy rather than the same one.
-//
-// Measured against production, same text, opus:
-//   1 container  (chunk_size=2000): timestamps monotonic, max pts 43.37s
-//   5 containers (chunk_size=50):   4 timestamp rewinds, max pts only 10.85s
-// Audio is NOT lost — Chrome's decodeAudioData still returns the full 43.63s, versus
-// 43.40s for WAV — because WebM Clusters are self-describing and a decoder keeps reading.
-// But Cluster timestamps are container-relative, so concatenation restarts the clock and
-// the progress bar and seeking go wrong.
-//
-// Merging properly in a Worker means rewriting EBML (merge Segments, rebase every Cluster
-// timestamp across 278KB / 2179 packets, inject a top-level Duration) against a 10ms CPU
-// budget. Rejecting with an actionable message is the proportionate fix.
-//
-// Note this deliberately does NOT address `<audio>.duration === null` for opus: that is
-// inherent to the upstream webm-24khz-16bit-mono-opus streaming muxing (a single-chunk
-// response has no Duration element either), not something concatenation caused.
+// Opus goes through the same concatenation path as WAV and is broken in the same way, but
+// it took a wrong turn first: measuring with decodeAudioData suggested no audio was lost,
+// so multi-chunk opus was refused with a 400. It is actually merged now — the detail, and
+// the corrected measurements, live in test/integration/webm-merge.test.mjs. What remains
+// here is the format-scoping: opus must not disturb mp3/pcm/wav.
 
 const MULTI_CHUNK_TEXT = '这是一句用来触发多分块的中文文本。'.repeat(12); // 204 chars
 
-test('multi-chunk opus is refused with an actionable 400 before any upstream call', async () => {
-  __test__.resetTokenCache();
-  __test__.resetVoicesCache();
-  const mock = installMockFetch();
-  try {
-    const res = await worker.fetch(
-      speechRequest({
-        input: MULTI_CHUNK_TEXT,
-        voice: 'zh-CN-XiaoxiaoNeural',
-        response_format: 'opus',
-        chunk_size: 50, // -> 5 chunks
-      }),
-      ANON,
-      {}
-    );
-    assert.equal(res.status, 400);
-    const json = await res.json();
-    assert.equal(json.error.code, 'opus_requires_single_chunk');
-    // Per the project's error contract: the actual count plus a way forward.
-    assert.match(json.error.message, /5/, 'states how many chunks it would produce');
-    assert.match(json.error.message, /chunk_size/, 'names the parameter to raise');
-    assert.match(json.error.message, /mp3|wav/, 'offers an alternative format');
-    assert.equal(mock.calls.synth, 0, 'refused before spending an upstream request');
-  } finally {
-    mock.restore();
-  }
-});
 
-test('single-chunk opus still works', async () => {
-  // The escape hatch the error message points at has to actually work.
+test('single-chunk opus needs no merging and is returned as-is', async () => {
+  // A single container is already correct; the merge path must not run at all.
   __test__.resetTokenCache();
   const mock = installMockFetch();
   try {
@@ -277,9 +237,9 @@ test('single-chunk opus still works', async () => {
   }
 });
 
-test('the opus restriction does not leak into the other formats', async () => {
-  // mp3 frames are self-synchronising, pcm is headerless, and wav is merged properly —
-  // all three must still accept multi-chunk input.
+test('opus handling does not leak into the other formats', async () => {
+  // mp3 frames are self-synchronising, pcm is headerless, and wav has its own merge —
+  // none of them may be routed through the WebM path.
   for (const format of ['mp3', 'wav', 'pcm']) {
     __test__.resetTokenCache();
     const mock = installMockFetch();
@@ -302,85 +262,4 @@ test('the opus restriction does not leak into the other formats', async () => {
   }
 });
 
-test('streaming opus is refused too when it would span chunks', async () => {
-  // The check sits before the stream/non-stream branch on purpose: once streaming headers
-  // are out there is no way to report the problem.
-  __test__.resetTokenCache();
-  const mock = installMockFetch();
-  try {
-    const res = await worker.fetch(
-      speechRequest({
-        input: MULTI_CHUNK_TEXT,
-        voice: 'zh-CN-XiaoxiaoNeural',
-        response_format: 'opus',
-        chunk_size: 50,
-        stream: true,
-      }),
-      ANON,
-      {}
-    );
-    assert.equal(res.status, 400, 'must be a clean error, not a broken stream');
-    assert.equal((await res.json()).error.code, 'opus_requires_single_chunk');
-    assert.equal(mock.calls.synth, 0);
-  } finally {
-    mock.restore();
-  }
-});
 
-test('the opus error only suggests raising chunk_size when that would actually work', async () => {
-  // An error must not hand out advice the caller cannot act on. The first version said
-  // "raise chunk_size (max 2000)" even when chunk_size was ALREADY 2000, and even when the
-  // text was too long to ever fit one chunk — both send the caller to burn another round
-  // trip on a guaranteed failure. The test is the feasibility of the advice, not the
-  // wording: does raising to the cap actually collapse this text to a single chunk?
-  const MAX = __test__.LIMITS.MAX_CHUNK_SIZE;
-  const unit = '这是一句用来触发多分块的中文文本。'; // 17 chars
-
-  const cases = [
-    // [approx chars, chunk_size, would raising to MAX help?]
-    [900, 300, true],
-    [1500, 50, true],
-    [3400, 300, false],   // too long for one chunk even at the cap
-    [3400, MAX, false],   // already at the cap
-  ];
-
-  for (const [chars, chunkSize, raisingHelps] of cases) {
-    __test__.resetTokenCache();
-    const mock = installMockFetch();
-    try {
-      const input = unit.repeat(Math.ceil(chars / unit.length));
-      const res = await worker.fetch(
-        speechRequest({
-          input,
-          voice: 'zh-CN-XiaoxiaoNeural',
-          response_format: 'opus',
-          chunk_size: chunkSize,
-        }),
-        ANON,
-        {}
-      );
-      assert.equal(res.status, 400, `${input.length} chars @ ${chunkSize} should be refused`);
-      const msg = (await res.json()).error.message;
-      const label = `${input.length} chars @ chunk_size=${chunkSize}`;
-
-      // Cross-check the premise against the real chunker rather than trusting the fixture.
-      assert.equal(
-        __test__.smartChunkText(input, MAX).length === 1,
-        raisingHelps,
-        label + ': fixture assumption about fitting at the cap is wrong'
-      );
-
-      if (raisingHelps) {
-        assert.match(msg, new RegExp('调到\\s*' + MAX), label + ': should point at the cap');
-      } else {
-        assert.doesNotMatch(msg, /请调大|调到/, label + ': must not suggest an impossible raise');
-        assert.match(msg, /mp3|wav/, label + ': must offer a format that works');
-        assert.match(msg, /拆成多次|多次请求/, label + ': must offer splitting the text');
-      }
-      // Always name the actual size so the caller can reason about it.
-      assert.match(msg, new RegExp(String(chunkSize)), label + ': states the chunk_size used');
-    } finally {
-      mock.restore();
-    }
-  }
-});

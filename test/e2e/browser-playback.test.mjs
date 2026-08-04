@@ -12,7 +12,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { chromeAvailable, launchChrome } from '../helpers/cdp.mjs';
-import { startUiServer } from '../helpers/ui-server.mjs';
+import { startUiServer, opusFixture } from '../helpers/ui-server.mjs';
 
 // Probing Chrome must itself be bounded. On a 2-core CI runner a browser that starts but
 // never becomes controllable left this await hanging at module load, before any test
@@ -410,39 +410,58 @@ test('a JSON error body still yields the server message', { skip: SKIP }, async 
   }
 });
 
-test('the UI can still use Opus with text longer than the default chunk size', { skip: SKIP }, async () => {
-  // Server-side, multi-chunk opus is refused (WebM concatenation restarts Cluster
-  // timestamps). The UI sends no chunk_size, so it would inherit the server default of
-  // 300 and every opus request over ~300 characters would fail — a regression introduced
-  // by the guard itself. getRequestBody() therefore asks for the maximum chunk size when
-  // opus is selected. This asserts the request the UI actually puts on the wire.
-  const out = await chrome.page.evaluate(`(async () => {
-    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
-    vm.form.responseFormat = 'opus';
-    vm.form.inputText = '这是一句用来触发多分块的中文文本。'.repeat(12); // 204 chars
-    const opus = vm.getRequestBody();
-    vm.form.responseFormat = 'mp3';
-    const mp3 = vm.getRequestBody();
-    return { opusChunk: opus.chunk_size, opusFormat: opus.response_format, mp3Chunk: mp3.chunk_size };
-  })()`);
-  assert.equal(out.opusFormat, 'opus');
-  assert.equal(out.opusChunk, 2000, 'opus must request the maximum chunk size');
-  assert.equal(out.mp3Chunk, undefined, 'other formats keep the server default');
 
-  // And end to end: a long opus request must come back as audio, not a 400.
-  const played = await chrome.page.evaluate(`(async () => {
+test('Opus playback covers the whole clip, not just the first container', { skip: SKIP }, async () => {
+  // The user-facing outcome of the WebM merge. Naive concatenation left <audio> reporting
+  // 9.44s for a file holding 94.56s of audio — up to 90% silently unplayable — because the
+  // element honours only the first EBML container. The merged file reports the full length.
+  //
+  // duration must be read AFTER seeking past the end: for an unknown-length Segment Chrome
+  // reports null at loadedmetadata, which is what made this look like an upstream quirk
+  // rather than data loss.
+  const merged = opusFixture();
+  if (!merged) return; // fixtures absent
+
+  const expected = await chrome.page.evaluate(`(async () => {
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;
     vm.form.responseFormat = 'opus';
-    vm.form.inputText = '这是一句用来触发多分块的中文文本。'.repeat(12);
+    vm.form.inputText = 'opus playback regression check';
     await vm.generateSpeech(false);
-    return { status: String(vm.status && vm.status.message), sent: null };
+    const el = vm.$refs.audioPlayer;
+    await new Promise((r) => {
+      if (el.readyState >= 1) return r();
+      el.addEventListener('loadedmetadata', r, { once: true });
+      setTimeout(r, 8000);
+    });
+    // Force Chrome to resolve the real duration of an unknown-length Segment.
+    try { el.currentTime = 1e9; } catch (e) {}
+    await new Promise((r) => setTimeout(r, 1500));
+    return {
+      duration: el.duration,
+      seekable: el.seekable.length ? el.seekable.end(0) : null,
+      errCode: el.error ? el.error.code : null,
+    };
   })()`);
-  assert.doesNotMatch(
-    played.status,
-    /opus_requires_single_chunk|400/,
-    'a UI user must not hit the single-chunk restriction, got ' + played.status
+
+  assert.equal(expected.errCode, null, 'the merged WebM decodes without error');
+  assert.ok(
+    typeof expected.duration === 'number' && isFinite(expected.duration),
+    'a merged container yields a real duration, got ' + expected.duration
   );
-  assert.equal(server.stats.lastBody.chunk_size, 2000, 'the server saw chunk_size=2000');
+  // The fixture is 3 upstream chunks of ~9.45s each (28.36s total, verified with ffmpeg).
+  // Before the merge only the first was reachable, so the discriminating threshold is
+  // "clearly more than one chunk" — expressed relative to the chunk length rather than as a
+  // magic number, so it keeps its meaning if the fixtures are ever regenerated.
+  const ONE_CHUNK_SECONDS = 9.45;
+  assert.ok(
+    expected.duration > ONE_CHUNK_SECONDS * 2,
+    'duration must span all three chunks, not stop at the first (' +
+      ONE_CHUNK_SECONDS.toFixed(2) + 's); got ' + expected.duration + 's'
+  );
+  assert.ok(
+    expected.seekable > ONE_CHUNK_SECONDS * 2,
+    'the whole clip is seekable, got ' + expected.seekable
+  );
 
   await chrome.page.evaluate(`(() => {
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;

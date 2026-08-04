@@ -5,6 +5,9 @@
 // so the "streaming must not truncate" regression can be asserted deterministically.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { readFileSync as readFileSyncSync } from 'node:fs';
+import { __test__ } from '../../src/worker.js';
+const { mergeWebmChunks } = __test__;
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -47,6 +50,26 @@ export function makePcm(seconds, { amp = 0.3, sampleRate = 24000 } = {}) {
     buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(s * 32767))), i * 2);
   }
   return buf;
+}
+
+/**
+ * Real upstream WebM/Opus chunks merged with the Worker's own mergeWebmChunks, cached.
+ * Returns null when the fixtures are absent so callers can skip rather than fail.
+ */
+let opusCache;
+export function opusFixture() {
+  if (opusCache !== undefined) return opusCache;
+  try {
+    const dir = join(root, "test/fixtures");
+    const parts = [];
+    for (let i = 0; i < 3; i++) {
+      parts.push(new Uint8Array(readFileSyncSync(join(dir, "opus-chunk" + i + ".webm"))).buffer);
+    }
+    opusCache = Buffer.from(mergeWebmChunks(parts));
+  } catch {
+    opusCache = null;
+  }
+  return opusCache;
 }
 
 const VOICES = [
@@ -120,6 +143,23 @@ export async function startUiServer(opts = {}) {
           if (chunkDelayMs) await new Promise((r) => setTimeout(r, chunkDelayMs));
         }
         res.end();
+      } else if (fmt === 'opus') {
+        // Real upstream WebM/Opus, merged the way the Worker does it. A synthesised WAV
+        // cannot exercise this path: the bug being guarded is that <audio> stops at the
+        // first EBML container, which only shows up with genuine WebM bytes.
+        const webm = opusFixture();
+        if (!webm) {
+          res.writeHead(503, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+          return res.end('opus fixtures missing');
+        }
+        stats.bytesSent += webm.length;
+        res.writeHead(200, {
+          'Content-Type': 'audio/webm',
+          'Content-Length': webm.length,
+          'Accept-Ranges': 'bytes',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(webm);
       } else {
         // Non-streaming: hand back a WAV so <audio> can actually decode it.
         const wav = pcmToWav(pcm);
