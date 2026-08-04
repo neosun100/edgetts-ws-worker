@@ -1343,6 +1343,21 @@
           this.copiedVoiceId = id;
           setTimeout(() => { if (this.copiedVoiceId === id) this.copiedVoiceId = ''; }, 1500);
         },
+        // 统一释放 Object URL。必须去重:非流式模式下 downloadUrl 与 audioSrc 指向
+        // 同一个 URL(见 playStandard),重复 revoke 无意义;而此前只 revoke 了
+        // downloadUrl、audioSrc 每次播放都新建却从不释放 —— 每个 URL 持有整个音频
+        // Blob，连续生成几十次会泄漏数十 MB,浏览器不会自动回收。
+        releaseObjectUrls() {
+          const seen = new Set();
+          for (const key of ['audioSrc', 'downloadUrl']) {
+            const url = this[key];
+            if (url && url.startsWith('blob:') && !seen.has(url)) {
+              seen.add(url);
+              try { URL.revokeObjectURL(url); } catch (e) { /* 已失效则忽略 */ }
+            }
+            this[key] = '';
+          }
+        },
         formatMimeType(fmt) {
           return {
             mp3: 'audio/mpeg', pcm: 'audio/pcm', opus: 'audio/webm', wav: 'audio/wav',
@@ -1401,12 +1416,8 @@
 
           this.isLoading = true;
           this.isStreaming = isStream;
-          this.audioSrc = '';
           this.showDownloadBtn = false; // 重置下载按钮状态
-          if (this.downloadUrl) {
-            URL.revokeObjectURL(this.downloadUrl); // 清理之前的下载链接
-            this.downloadUrl = '';
-          }
+          this.releaseObjectUrls();
           this.updateStatus('正在连接服务器...', 'info');
 
           try {
@@ -2195,13 +2206,9 @@
         this.loadVoices();
       },
       beforeUnmount() {
-        // 清理URL对象，避免内存泄漏
-        if (this.audioSrc) {
-          URL.revokeObjectURL(this.audioSrc);
-        }
-        if (this.downloadUrl && this.downloadUrl !== this.audioSrc) {
-          URL.revokeObjectURL(this.downloadUrl);
-        }
+        // 复用同一个释放逻辑,避免两处清理规则漂移
+        this.releaseObjectUrls();
+        this.stopViz();
       }
     }).mount('#app');
   </script>

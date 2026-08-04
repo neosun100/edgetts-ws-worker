@@ -104,8 +104,10 @@ async function handleRequest(request, env) {
     if (url.pathname === "/v1/audio/speech") return await handleSpeechRequest(request);
     if (url.pathname === "/v1/models") return await handleModelsRequest(request);
   } catch (err) {
+    // 同上：内部错误细节只进日志。err.message 可能是运行时抛出的原始信息
+    // (依赖内部路径、变量名等)，不该出现在面向公网的响应里。
     console.error("请求处理器错误:", err);
-    return errorResponse(err.message, 500, "internal_server_error");
+    return errorResponse("服务器内部错误", 500, "internal_server_error");
   }
   return errorResponse("未找到", 404, "not_found");
 }
@@ -465,8 +467,10 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
       headers: { "Content-Type": contentType, ...makeCORSHeaders() }
     });
   } catch (error) {
+    // 完整错误(含堆栈)只进日志；回给调用方的是我们自己的措辞 + 机器码，
+    // 避免任何内部实现细节(上游原文、路径、依赖名)顺着 message 泄漏出去。
     console.error("非流式 TTS 失败:", error);
-    return errorResponse(error.message, 500, "tts_generation_error");
+    return errorResponse("语音合成失败，请稍后重试", 500, "tts_generation_error");
   }
 }
 var MAX_CHUNK_ATTEMPTS = 3;
@@ -491,9 +495,14 @@ async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, 
       });
       if (!response.ok) {
         const errorText = await response.text();
-        const err = new Error(
-          `Edge TTS API 错误: ${response.status} ${response.statusText} - ${errorText}`
+        // 上游的响应体只进日志，不进 Error.message —— 因为 getVoice 的 catch 会把
+        // error.message 原样放进 HTTP 响应，等于把微软的错误原文(可能含订阅密钥片段、
+        // 内部主机名、请求 ID)转发给任意调用方。实测泄漏过
+        // "Subscription key sk-... rejected at /internal/host" 这种内容。
+        console.error(
+          `上游合成失败: ${response.status} ${response.statusText} - ${errorText.slice(0, 500)}`
         );
+        const err = new Error(`上游语音合成失败（${response.status}）`);
         err.status = response.status;
         throw err;
       }

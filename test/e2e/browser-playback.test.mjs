@@ -159,6 +159,34 @@ test('the visualiser reacts to real audio (hue/sat driven by the signal)', { ski
   }
 });
 
+test('object URLs are released between playbacks (no Blob leak)', { skip: SKIP }, async () => {
+  // Found by audit: only downloadUrl was revoked. audioSrc got a fresh Object URL on
+  // every standard playback and was never released (it was merely reassigned to ''),
+  // so each run pinned a whole audio Blob until the page unloaded — a single-page app
+  // basically never unloads. Measured 4 leaked URLs over 4 playbacks before the fix.
+  const r = await chrome.page.evaluate(`(async () => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+    let created = 0, revoked = 0;
+    const oc = URL.createObjectURL, orv = URL.revokeObjectURL;
+    URL.createObjectURL = function (b) { created++; return oc.call(URL, b); };
+    URL.revokeObjectURL = function (u) { revoked++; return orv.call(URL, u); };
+    for (let i = 0; i < 4; i++) {
+      await vm.generateSpeech(false).catch(() => {});
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    URL.createObjectURL = oc; URL.revokeObjectURL = orv;
+    return { created, revoked, stillHeld: vm.audioSrc ? 1 : 0 };
+  })()`);
+
+  assert.ok(r.created >= 4, 'each playback created an object URL, got ' + r.created);
+  // Exactly one may remain: the URL backing the audio that is still loaded.
+  const leaked = r.created - r.revoked;
+  assert.ok(
+    leaked <= 1,
+    `leaked ${leaked} object URLs across 4 playbacks (created ${r.created}, revoked ${r.revoked})`
+  );
+});
+
 test('dark theme applies and its surfaces are genuinely dark', { skip: SKIP }, async () => {
   // Headless Chrome follows prefers-color-scheme and may already be dark, in which case
   // "toggle until dark" would never fire and never write storage. Toggle to light first,

@@ -1,5 +1,35 @@
 # Changelog
 
+## [2.9.0] - 2026-08-04
+
+深度审计发现并修复两个真实缺陷，均由「亲手复现」而非静态检查得出。
+
+### Fixed
+- **上游错误响应体被原样转发给调用方（信息泄漏）**。`getAudioChunk` 把上游响应体拼进
+  `Error.message`，`getVoice` 的 catch 又把 `error.message` 直接放进 HTTP 响应，形成
+  「上游响应体 → Error → 公网响应」的泄漏链。用 stub 上游返回
+  `Subscription key sk-INTERNAL-abc123 rejected at /internal/host`，该字符串原样出现在
+  500 响应体里。微软的错误原文可能含订阅密钥片段、内部主机名、请求 ID。
+  现在完整内容只进日志，回给调用方的是我们自己的措辞 + 稳定机器码。
+  顶层 handler 与 `/v1/models/public` 的错误路径一并收口。
+  **注意保留了该保留的**：调用方自身的参数错误仍然给出实际值与允许范围
+  （如 `speed 超出范围：99，允许 0.25–4`），只有内部细节被隐去。
+- **`audioSrc` 的 Object URL 每次播放泄漏一个**。清理路径只 `revoke` 了 `downloadUrl`，
+  而 `audioSrc` 每次标准播放都新建、仅被重新赋值为 `''` 从未释放 —— 每个 URL 持有整个
+  音频 Blob，而单页应用几乎不会卸载。真实浏览器实测：4 次播放泄漏 4 个 URL。
+  改为统一的 `releaseObjectUrls()`（去重后释放两者，非流式下二者指向同一 URL），
+  `beforeUnmount` 也复用它以免两处规则漂移。修复后实测 4 次播放仅剩 1 个
+  （最后一次仍在播，属正确）。
+
+### Added
+- `test/integration/error-disclosure.test.mjs`（4 例）：断言上游错误体/内部路径不出现在
+  响应中、完整内容仍可从日志取得，并**反向断言**校验类错误必须继续携带实际值与限制值。
+- 浏览器回归：`object URLs are released between playbacks`，通过挂钩
+  `URL.createObjectURL`/`revokeObjectURL` 计数来量化泄漏，而不是读代码判断。
+
+### Changed
+- 测试 189 → **194**；E2E 14 → **15**。
+
 ## [2.8.0] - 2026-08-04
 
 ### Fixed
