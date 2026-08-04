@@ -68,6 +68,17 @@
   BUG#7b 用 try/catch 包住全部断言、两条分支都算通过（实测永远走 catch，三条断言从未执行）。
 - **两个静默失效的护栏**：`build.mjs` 只匹配小写 `<script>`，大写 `<SCRIPT>` 完全绕过；
   `CHROME_PATH` 排在候选列表末位，装了 Chrome 的机器上永远不生效（与文档承诺相反）。
+- **GitHub CI 的挂起有两个 Linux 特有原因**（修好构建顺序后才暴露出来，且因为「挂起不产生
+  日志」，我先盲修了三轮才拿到证据 —— 是 `timeout-minutes` 让 job 结束、日志可下载才定的位）：
+  ① Chrome 关闭时仍在异步写 profile 目录，`SIGKILL` 后立刻 `rm` 撞上正在写入的文件抛
+  `ENOTEMPTY`，而这个拒绝来自 `after()` 钩子 —— node 子进程成为孤儿，job 挂到超时。
+  macOS 允许删除已打开的文件，所以本地永不复现（`--test-concurrency=2` 也只需 30 秒）。
+  现在等进程真正退出再删，且把临时目录清理当作 best-effort：残留一个目录不值得让构建变红。
+  ② 暗色主题测试依赖浏览器的默认配色 —— headless Chrome 跟随 `prefers-color-scheme`，
+  本机是深色而 GitHub runner 是浅色，于是「切到浅色」那条分支在 Linux 上从未执行，
+  localStorage 里什么都没写。改为先驱动到已知状态再做两次真实切换。
+- 加了 `--test-timeout=120000` 与 `timeout-minutes: 10`：任何将来的挂起都会变成带堆栈的
+  失败，而不是一个静默烧 runner 时间的 in_progress。
 - **e2e 套件 101s → 29s**。`server.close()` 只停止接受新连接、然后等 Chrome 的 keep-alive
   socket 自然结束，单个测试因此干等 58 秒。改用 `closeAllConnections()`（58s → 0.28s）。
 - 修掉一个自己引入的顺序依赖：「完整时长」测试的全局计数器从不重置，另一条流式测试跑过
