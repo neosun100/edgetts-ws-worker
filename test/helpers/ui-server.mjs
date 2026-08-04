@@ -61,9 +61,11 @@ const VOICES = [
  *  - pcmSeconds: duration of audio the stubbed /v1/audio/speech returns
  *  - chunkMs: how much audio per streamed chunk (exercises incremental playback)
  *  - chunkDelayMs: delay between chunks, to simulate a slow upstream
+ *  - failSpeech: when set, /v1/audio/speech answers with this status and a JSON error
+ *    body instead of audio — for asserting that the UI cleans up after a failure
  */
 export async function startUiServer(opts = {}) {
-  const { pcmSeconds = 3, chunkMs = 200, chunkDelayMs = 15 } = opts;
+  const { pcmSeconds = 3, chunkMs = 200, chunkDelayMs = 15, failSpeech = 0 } = opts;
   const html = await extractUiHtml();
   const stats = { speechRequests: 0, lastBody: null, bytesSent: 0 };
 
@@ -81,6 +83,15 @@ export async function startUiServer(opts = {}) {
       for await (const c of req) chunks.push(c);
       stats.speechRequests++;
       try { stats.lastBody = JSON.parse(Buffer.concat(chunks).toString()); } catch { stats.lastBody = null; }
+
+      if (failSpeech) {
+        res.writeHead(failSpeech, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(JSON.stringify({ error: { message: 'stub failure', code: 'tts_generation_error' } }));
+        return;
+      }
 
       const body = stats.lastBody || {};
       const pcm = makePcm(pcmSeconds);

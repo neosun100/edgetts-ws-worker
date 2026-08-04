@@ -749,7 +749,7 @@ function smartChunkText(text, maxChunkLength) {
         if (slice.length === maxChunkLength) {
           if (slice.trim()) chunks.push(slice.trim());
         } else {
-          if (slice.trim()) chunks.push(slice.trim());
+          currentChunk = slice; // keep the tail open for the next segment
         }
       }
     } else {

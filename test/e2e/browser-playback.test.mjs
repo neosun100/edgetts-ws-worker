@@ -66,25 +66,33 @@ test('UI mounts and loads the voice list', { skip: SKIP }, async () => {
 test('streaming playback schedules the FULL duration (no 1.67s truncation)', { skip: SKIP }, async () => {
   // Instrument AudioBufferSourceNode.start so we can measure exactly how much audio the
   // app scheduled — this is the honest signal. Byte counts alone wouldn't prove playback.
+  // The counter must cover exactly ONE playback. It measures a total against an upper
+  // bound of PCM_SECONDS * 1.1, so any earlier streaming on this page (the
+  // download-extension test also calls generateSpeech(true)) would carry over and read
+  // as "duplicated" — 3.00s becomes 6.00s, reproduced directly. Patch start() once, then
+  // zero the counter immediately before the run being measured.
   await chrome.page.evaluate(`(() => {
-    window.__sched = { totalSeconds: 0, calls: 0, lastEnd: 0 };
     const proto = AudioBufferSourceNode.prototype;
-    const origStart = proto.start;
-    proto.start = function (when, ...rest) {
-      try {
-        if (this.buffer) {
-          window.__sched.totalSeconds += this.buffer.duration;
-          window.__sched.calls++;
-          window.__sched.lastEnd = Math.max(window.__sched.lastEnd, (when || 0) + this.buffer.duration);
-        }
-      } catch (e) { /* never break playback for instrumentation */ }
-      return origStart.call(this, when, ...rest);
-    };
+    if (!proto.__schedPatched) {
+      proto.__schedPatched = true;
+      const origStart = proto.start;
+      proto.start = function (when, ...rest) {
+        try {
+          if (this.buffer && window.__sched) {
+            window.__sched.totalSeconds += this.buffer.duration;
+            window.__sched.calls++;
+            window.__sched.lastEnd = Math.max(window.__sched.lastEnd, (when || 0) + this.buffer.duration);
+          }
+        } catch (e) { /* never break playback for instrumentation */ }
+        return origStart.call(this, when, ...rest);
+      };
+    }
     return true;
   })()`);
 
-  // Kick off streaming playback through the app's own code path.
+  // Kick off streaming playback through the app's own code path, with a fresh counter.
   await chrome.page.evaluate(`(() => {
+    window.__sched = { totalSeconds: 0, calls: 0, lastEnd: 0 };
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;
     window.__done = vm.generateSpeech(true).then(() => 'ok', (e) => 'err: ' + e.message);
     return true;
@@ -230,4 +238,100 @@ test('dark theme applies and its surfaces are genuinely dark', { skip: SKIP }, a
   // Guards the bug where dark mode still painted light surfaces.
   const rgb = after_.htmlBg.match(/\d+/g).map(Number);
   assert.ok(rgb[0] < 60 && rgb[1] < 60 && rgb[2] < 80, 'page base is genuinely dark: ' + after_.htmlBg);
+});
+
+test('a failed streaming request stops the visualiser RAF loop', { skip: SKIP }, async () => {
+  // The visualiser's RAF loop was only cancelled from `source.onended`. When streaming
+  // fails before a single AudioBufferSourceNode is scheduled (upstream 500, network
+  // drop), that callback never fires and the loop kept re-arming itself at ~120fps,
+  // burning CPU and battery until the tab was closed. Measured on the buggy build: the
+  // vizRAF handle climbed from 3 to 101 within 800ms of the failure.
+  //
+  // Needs its own server whose /v1/audio/speech fails, so it does not disturb the
+  // shared one used by the tests above.
+  const failing = await startUiServer({ failSpeech: 500 });
+  const page = chrome.page;
+  try {
+    await page.goto(failing.url);
+    const out = await page.evaluate(`(async () => {
+      const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+      vm.config.baseUrl = ${JSON.stringify(failing.url)};
+      vm.config.apiKey = 'test-key';
+      vm.form.inputText = 'this request is going to fail';
+      // generateSpeech catches internally, so it resolves rather than rejecting.
+      await vm.generateSpeech(true);
+      const handleAtFailure = vm.vizRAF;
+      const activeAtFailure = vm.vizActive;
+      await new Promise((r) => setTimeout(r, 800));
+      return {
+        handleAtFailure,
+        activeAtFailure,
+        handleLater: vm.vizRAF,
+        activeLater: vm.vizActive,
+        isLoading: vm.isLoading,
+        isStreaming: vm.isStreaming,
+      };
+    })()`);
+
+    // A null handle and vizActive false both mean the loop is not re-arming. Comparing
+    // the handle before/after the wait is the direct evidence: a live loop hands out a
+    // new id every frame.
+    assert.equal(out.handleLater, null, 'vizRAF must be cleared, got ' + out.handleLater);
+    assert.equal(out.activeLater, false, 'vizActive must be false after a failure');
+    assert.equal(
+      out.handleAtFailure,
+      out.handleLater,
+      'the RAF handle changed during the wait — the loop is still spinning'
+    );
+    // The failure must also leave the UI usable rather than stuck in a loading state.
+    assert.equal(out.isLoading, false, 'loading flag cleared');
+    assert.equal(out.isStreaming, false, 'streaming flag cleared');
+  } finally {
+    await failing.close();
+    // Restore the shared fixture for any test that runs after this one.
+    await page.goto(server.url);
+    await configureApp();
+  }
+});
+
+test('the download filename extension matches the actual audio format', { skip: SKIP }, async () => {
+  // Every download was named .mp3 regardless of format, so a WAV or Opus file arrived
+  // with an extension that contradicts its container and desktop players refused it.
+  // Streaming is a second case: the server sends raw PCM, and the UI converts it with
+  // pcmToWav, so the correct extension is wav — not the format the user picked.
+  const out = await chrome.page.evaluate(`(async () => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+    const captured = [];
+    // downloadAudio() creates an <a>, sets download, and clicks it. Intercept the click
+    // so the browser does not actually try to save anything.
+    const realClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function () { captured.push(this.download); };
+    try {
+      const results = {};
+      for (const fmt of ['wav', 'opus', 'mp3']) {
+        vm.form.responseFormat = fmt;
+        await vm.generateSpeech(false);       // standard playback keeps the chosen format
+        captured.length = 0;
+        vm.downloadAudio();
+        results['standard_' + fmt] = captured[0] || null;
+      }
+      // Streaming: forced to pcm on the wire, downloaded as wav.
+      vm.form.responseFormat = 'mp3';
+      await vm.generateSpeech(true);
+      captured.length = 0;
+      vm.downloadAudio();
+      results.streaming = captured[0] || null;
+      return results;
+    } finally {
+      HTMLAnchorElement.prototype.click = realClick;
+    }
+  })()`);
+
+  assert.ok(out.standard_wav?.endsWith('.wav'), 'wav download must be .wav, got ' + out.standard_wav);
+  assert.ok(out.standard_opus?.endsWith('.opus'), 'opus download must be .opus, got ' + out.standard_opus);
+  assert.ok(out.standard_mp3?.endsWith('.mp3'), 'mp3 download must be .mp3, got ' + out.standard_mp3);
+  assert.ok(
+    out.streaming?.endsWith('.wav'),
+    'a streamed download is pcmToWav output, so it must be .wav, got ' + out.streaming
+  );
 });

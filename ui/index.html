@@ -1093,6 +1093,7 @@
           vizDebug: null,        // 当前配色(hue/sat/rms)，供调试与自动化验证
           audioSrc: '',
           downloadUrl: '', // 添加下载链接
+          downloadExt: 'mp3', // 下载文件的真实扩展名（随 response_format / 流式转码变化）
           showDownloadBtn: false, // 控制下载按钮显示
           pauseTime: 1.0, // 停顿时间
           availableVoices: [], // 可用语音列表（始终是完整的 322 个，不做裁剪）
@@ -1309,7 +1310,9 @@
             const link = document.createElement('a');
             link.href = this.downloadUrl;
             let timeString = (new Date().toLocaleString() + '-').replace(/[/:]/g, '-').replace(/s/g, '_').replace(/[-_](d)[-_]/g, '-0$1-').slice(0, -1);
-            link.download = 'tts-audio-' + timeString + '.mp3';
+            // 扩展名必须跟实际字节走：全部写成 .mp3 会让 wav/opus 文件在
+            // 系统播放器里因容器与后缀不符而打不开，流式下载的其实是 pcmToWav 的 WAV。
+            link.download = 'tts-audio-' + timeString + '.' + (this.downloadExt || 'mp3');
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -1429,6 +1432,12 @@
           } catch (error) {
             console.error('Error generating speech:', error);
             this.updateStatus('错误: ' + error.message, 'error');
+            // 声纹的 RAF 循环只在 source.onended 里停。流式失败时（上游 500、网络断开、
+            // 权限被拒）可能一个 AudioBufferSourceNode 都没排上，那个回调永远不触发，
+            // 循环就以约 120fps 无限空转烧 CPU 和电量，直到用户关页面。实测失败后 0.8
+            // 秒内 vizRAF 句柄从 3 涨到 101。这里必须无参调用 stopViz（强制停止），
+            // 传代号的版本会因为代际检查而对已失败的一代放行不管。
+            this.stopViz();
           } finally {
             this.isLoading = false;
             this.isStreaming = false;
@@ -1455,6 +1464,7 @@
           const blob = await response.blob();
           this.audioSrc = URL.createObjectURL(blob);
           this.downloadUrl = this.audioSrc; // 非流式模式直接使用相同的URL
+          this.downloadExt = this.form.responseFormat;
           this.showDownloadBtn = true;
           this.updateStatus('播放中...', 'success');
 
@@ -1525,6 +1535,7 @@
             const mimeType = self.formatMimeType(body.response_format);
             const audioBlob = new Blob(audioChunks, { type: mimeType });
             self.downloadUrl = URL.createObjectURL(audioBlob);
+            self.downloadExt = body.response_format;
             self.showDownloadBtn = true;
 
             self.streamStats.playStart = Date.now() - startTime;
@@ -1705,6 +1716,7 @@
             // 转换为 WAV 供下载
             const wavBlob = self.pcmToWav(pcmBuffer, SAMPLE_RATE);
             self.downloadUrl = URL.createObjectURL(wavBlob);
+            self.downloadExt = 'wav'; // 裸 PCM 不能直接播，下载的是 pcmToWav 的产物
             self.showDownloadBtn = true;
             
             const expectedDuration = (totalLength / 2 / SAMPLE_RATE).toFixed(1);
