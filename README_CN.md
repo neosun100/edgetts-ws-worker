@@ -21,8 +21,8 @@ API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。�
 ## 特性
 
 - 🎙️ **322 个音色，40+ 语言** —— 微软全部神经网络音色，含多语言音色。
-- ⚡ **真流式** —— 流式下传裸 PCM，首个分块即可开播且不会中途截断（MP3 等容器格式无法
-  边收边播，详见[流式说明](#流式)）。
+- ⚡ **真流式** —— 用 `response_format: "pcm"` 时首个分块即可开播并完整播到结束
+  （MP3 等容器格式无法边收边播，详见[流式说明](#流式)）。
 - 🧩 **兼容 OpenAI** —— `POST /v1/audio/speech`，可直接替换 OpenAI TTS。
 - 🚀 **并发合成** —— 长文本按句分块，滑动窗口并发合成后**保序**下传（长文本 4×+ 提速）。
 - 🌍 **全球边缘** —— 跑在 Cloudflare 300+ 节点，单请求 CPU < 1ms。
@@ -79,7 +79,7 @@ npx wrangler deploy
 
 ```jsonc
 {
-  "input": "要合成的文本。",       // 必填，≤ 50000 字符
+  "input": "要合成的文本。",       // 必填，长度上限见下文
   "voice": "zh-CN-XiaoxiaoNeural", // 或 OpenAI 别名：alloy/echo/fable/onyx/nova/shimmer
   "speed": 1.0,                     // 0.25–4.0
   "pitch": 1.0,                     // 0.5–1.5
@@ -96,14 +96,23 @@ npx wrangler deploy
 <a name="流式"></a>
 #### 流式
 
-设 `stream: true`。无论 `response_format` 是什么，服务端都流式下传**裸 PCM** —— 因为容器
-格式（MP3/Opus/WAV）无法增量解码：部分 MP3 会被当成一个「完整的短片段」播完即停。内置
-Web UI 用 Web Audio API 在连续时间轴上播放流式 PCM，因此立即开播、绝不截断。非流式请求
-则返回正常的 MP3/Opus/WAV 文件。
+设 `stream: true`，服务端会按分块到达的顺序流式下传，格式就是你请求的那个。
+
+**流式请务必用 `response_format: "pcm"`。** 容器格式（MP3/Opus/WAV）无法增量解码：部分
+MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本项目最初要解决的 1.67 秒截断。服务端
+**不会**替你改写格式，你请求什么就下传什么。内置 Web UI 会在发送流式请求前自动把格式改成
+`pcm`，并用 Web Audio API 在连续时间轴上播放，因此立即开播、不会截断；直接调 API 的调用方
+需要自己做这个选择。
+
+非流式请求则返回正常的 MP3/Opus/WAV 文件。
 
 ### `GET /v1/models` · `GET /v1/models/public`
 
-以类 OpenAI-models 结构列出全部音色（322 个）。查询过滤：`?neural=true`、`?multilingual=true`。
+以类 OpenAI-models 结构列出全部音色（322 个）。两个端点接受相同的查询过滤：
+
+- `?multilingual=true` —— 只返回多语言音色（322 个里的 12 个）。
+- `?neural=true` —— 为兼容既有调用方而保留，但是个 **no-op**：上游所有音色本身都是
+  Neural 音色，过滤不掉任何东西。
 
 列表在进程内缓存 6 小时，并带 `Cache-Control: public, max-age=21600`，重复调用不再穿透上游。
 上游故障时返回最后一次成功的列表（并打 warn 日志），而不是直接失败。
@@ -130,7 +139,19 @@ Web UI 用 Web Audio API 在连续时间轴上播放流式 PCM，因此立即开
 | `API_KEY` | secret | `/v1/audio/speech` 所需的 Bearer 令牌。**未设置时 Worker 返回 503**，而非无鉴权放行。 |
 | `ALLOW_ANONYMOUS` | var | 设为 `"true"` 以明确开放访问（无需 key）。 |
 
-> 请求体上限 256KB，`input` 上限 50000 字符；超限返回 413 `payload_too_large`。
+### 长度上限
+
+请求体上限 256KB（413 `payload_too_large`），`input` 上限 50000 字符（400 `input_too_long`）。
+
+**真正的约束是分块数，不是字符数。** 文本按 `chunk_size` 切块，每块消耗一次上游
+subrequest，而 Cloudflare 单次调用只允许 50 次。因此超过 45 块会被拒绝并返回 413
+`too_many_chunks` —— 默认 `chunk_size=300` 时约合 13500 字符。
+
+要合成更长的文本，把 `chunk_size` 调大（上限 2000，约合 9 万字符），或拆成多次请求。
+块越粗则上游调用越少越长：首字节略慢，但余量大得多。
+
+这个校验刻意放在写出任何响应字节**之前**：流式请求一旦超出平台预算，旧行为是
+HTTP 200 + 格式完好的 EOF，调用方无法区分被截断的音频和完整音频。
 
 ## 开发
 

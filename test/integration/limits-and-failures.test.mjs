@@ -278,3 +278,93 @@ test('streaming failure breaks the body rather than serving a short valid file',
     await new Promise((r) => setTimeout(r, 25));
   });
 });
+
+// ------------------------------------------------------------------ chunk count
+// The real ceiling is the number of chunks, not the number of characters: each chunk is
+// one upstream subrequest and Cloudflare caps a single invocation at 50. MAX_INPUT_CHARS
+// (50000) validated the wrong quantity — at the default chunk_size of 300 the documented
+// maximum needs 167 subrequests, so it could never work.
+//
+// Measured on production 2026-08-04: with chunk_size=50, 50 chunks succeeded and 51
+// returned 500; with default parameters, ~6000 characters already failed intermittently
+// with a bare CF 503 (error code 1102) and 15000 characters failed every time.
+//
+// Streaming made this far worse than a plain error. Once the response headers are out,
+// the runtime killing the isolate leaves the client with 200 plus a well-formed EOF —
+// the truncated body ends in the same 0\r\n\r\n terminator as a complete one, so a
+// caller genuinely cannot tell a 2-second clip from the 30-second one it asked for.
+// Hence the check must run before anything is written.
+
+test('too many chunks is refused with 413 before any response is streamed', async () => {
+  await withMock({}, async (mock) => {
+    const limit = __test__.LIMITS.MAX_CHUNKS;
+    // 'ab。' is one chunk per ~17 units at chunk_size 50; use the default 300 and enough
+    // text to exceed the limit comfortably.
+    const input = 'ab。'.repeat(6000); // ~18000 chars -> ~60 chunks at chunk_size 300
+    const res = await worker.fetch(
+      speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: 300, stream: true }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 413, 'must be an explicit error, not a truncated 200');
+    const json = await res.json();
+    assert.equal(json.error.code, 'too_many_chunks');
+    // Per the project's error contract: actual, limit, and a way forward.
+    assert.match(json.error.message, new RegExp(String(limit)), 'states the limit');
+    assert.match(json.error.message, /chunk_size/, 'names the parameter to change');
+    assert.equal(mock.calls.synth, 0, 'refused before a single subrequest was made');
+  });
+});
+
+test('the chunk limit applies to non-streaming requests too', async () => {
+  await withMock({}, async (mock) => {
+    const res = await worker.fetch(
+      speechRequest({ input: 'ab。'.repeat(6000), voice: 'en-US-AvaNeural', chunk_size: 300 }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 413);
+    assert.equal((await res.json()).error.code, 'too_many_chunks');
+    assert.equal(mock.calls.synth, 0);
+  });
+});
+
+test('a larger chunk_size is a real workaround for long text', async () => {
+  // The error message tells callers to raise chunk_size, so that has to actually work —
+  // otherwise the advice is misleading. 45000 chars at chunk_size 2000 is ~23 chunks.
+  await withMock({}, async (mock) => {
+    const res = await worker.fetch(
+      speechRequest({ input: 'ab。'.repeat(15000), voice: 'en-US-AvaNeural', chunk_size: 2000 }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 200, 'long text succeeds when chunked coarsely');
+    assert.ok(
+      mock.calls.synth <= __test__.LIMITS.MAX_CHUNKS,
+      'stays within the subrequest budget, got ' + mock.calls.synth
+    );
+  });
+});
+
+test('a request just under the chunk limit still succeeds', async () => {
+  // Guards the boundary in the permissive direction: MAX_CHUNKS must not be so tight
+  // that ordinary long-ish input breaks.
+  await withMock({}, async (mock) => {
+    const res = await worker.fetch(
+      speechRequest({ input: 'ab。'.repeat(4000), voice: 'en-US-AvaNeural', chunk_size: 300 }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 200);
+    assert.ok(mock.calls.synth > 1, 'genuinely multi-chunk, got ' + mock.calls.synth);
+    assert.ok(mock.calls.synth <= __test__.LIMITS.MAX_CHUNKS);
+  });
+});
+
+test('MAX_CHUNKS leaves headroom under the Cloudflare subrequest ceiling', async () => {
+  // Synthesis is not the only subrequest: the token endpoint and the voice list also
+  // spend from the same budget of 50.
+  const { MAX_CHUNKS } = __test__.LIMITS;
+  assert.ok(MAX_CHUNKS < 50, 'must stay below the platform limit of 50');
+  assert.ok(50 - MAX_CHUNKS >= 3, 'leaves room for token/voice-list requests');
+});

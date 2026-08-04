@@ -28,6 +28,15 @@ var LIMITS = {
   MAX_CONCURRENCY: 20,
   MIN_CHUNK_SIZE: 50,
   MAX_CHUNK_SIZE: 2000,
+  // 真正的硬约束是**分块数**，不是字符数：每个分块一次上游 subrequest，而 Workers 单次
+  // 调用的 subrequest 上限是 50。默认 chunk_size=300 时，50000 字符要 167 个 subrequest，
+  // 必然超限。线上实测（2026-08-04）：chunk_size=50 时 50 块还能过、51 块就 500；默认
+  // 参数下约 6000 字符起就开始间歇性 503（CF error 1102），15000 字符稳定失败。
+  //
+  // 留 5 个余量给 token 端点与语音列表等非合成请求。超限时必须在**发出响应头之前**拒绝：
+  // 流式路径一旦发过头，CF 掐掉 isolate 后客户端只会看到 200 + 干净 EOF 的短音频，
+  // 与成功完全无法区分（实测截断响应与完整响应的结尾字节都是 0\r\n\r\n）。
+  MAX_CHUNKS: 45,
 };
 
 // Microsoft voice names look like "zh-CN-XiaoxiaoNeural" or "zh-CN-liaoning-XiaobeiNeural".
@@ -58,7 +67,7 @@ var workers_default = {
 async function handleRequest(request, env) {
   if (request.method === "OPTIONS") return handleOptions(request);
   const url = new URL(request.url);
-  if (url.pathname === "/v1/models/public") return await handlePublicModelsRequest();
+  if (url.pathname === "/v1/models/public") return await handlePublicModelsRequest(request);
   // favicon 必须在鉴权之前短路：否则浏览器自动发起的 /favicon.ico 会命中鉴权分支
   // 返回 401，在 devtools 里留下一条无意义的错误。直接返回内嵌的 logo。
   if (url.pathname === "/favicon.ico" || url.pathname === "/favicon.svg") {
@@ -299,6 +308,19 @@ async function handleSpeechRequest(request) {
   if (textChunks.length === 0) {
     return errorResponse("文本分块结果为空", 400, "input_empty_after_cleaning");
   }
+  // 必须在这里拦：此时分块数已知，而响应头还没发出。放到流式循环里就来不及了。
+  // 错误信息给出可执行的出路（调大 chunk_size 能显著减少分块数），而不是只说「太长」。
+  if (textChunks.length > LIMITS.MAX_CHUNKS) {
+    const maxChars = LIMITS.MAX_CHUNKS * safeChunkSize;
+    return errorResponse(
+      `文本过长：按 chunk_size=${safeChunkSize} 会切成 ${textChunks.length} 个分块，` +
+        `超过上限 ${LIMITS.MAX_CHUNKS}（Cloudflare Workers 单请求最多 50 个子请求）。` +
+        `当前 chunk_size 下最多约 ${maxChars} 字符；调大 chunk_size（上限 ` +
+        `${LIMITS.MAX_CHUNK_SIZE}）可处理更长文本，或把文本拆成多次请求。`,
+      413,
+      "too_many_chunks"
+    );
+  }
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
   if (stream) {
     return await streamVoice(textChunks, safeConcurrency, ...ttsArgs);
@@ -369,10 +391,32 @@ function modelsHeaders() {
   };
 }
 
-async function handlePublicModelsRequest() {
+/**
+ * 按查询参数过滤语音列表。两个端点共用，因为 README 承诺的过滤能力不该只在
+ * 需要鉴权的那一个上生效 —— 内置 UI 的音色筛选走的正是公开端点。
+ *
+ * 注意 ?neural：上游 322 个音色**全部**含 "Neural"，所以这个参数恒为 no-op。
+ * 保留它是为了向后兼容既有调用方（去掉会让 ?neural=true 的请求行为改变），
+ * 但文档里已标注它没有实际作用，不要在此基础上做新设计。
+ */
+function filterModels(models, url) {
+  const on = (v) => v === "true" || v === "1";
+  let out = models;
+  if (on(url.searchParams.get("neural"))) {
+    out = out.filter((m) => m.id.includes("Neural"));
+  }
+  if (on(url.searchParams.get("multilingual"))) {
+    out = out.filter((m) => m.id.includes("Multilingual"));
+  }
+  return out;
+}
+
+async function handlePublicModelsRequest(request) {
   try {
     const models = await getModels();
-    return new Response(JSON.stringify(models), { headers: modelsHeaders() });
+    return new Response(JSON.stringify(filterModels(models, new URL(request.url))), {
+      headers: modelsHeaders()
+    });
   } catch (error) {
     console.error("获取语音列表失败:", error);
     return errorResponse("Failed to fetch voices", 500, "fetch_error");
@@ -380,17 +424,10 @@ async function handlePublicModelsRequest() {
 }
 async function handleModelsRequest(request) {
   try {
-    let models = await getModels();
-    const url = new URL(request.url);
-    const filterNeural = url.searchParams.get("neural");
-    const filterMultilingual = url.searchParams.get("multilingual");
-    if (filterNeural === "true" || filterNeural === "1") {
-      models = models.filter((m) => m.id.includes("Neural"));
-    }
-    if (filterMultilingual === "true" || filterMultilingual === "1") {
-      models = models.filter((m) => m.id.includes("Multilingual"));
-    }
-    return new Response(JSON.stringify(models), { headers: modelsHeaders() });
+    const models = await getModels();
+    return new Response(JSON.stringify(filterModels(models, new URL(request.url))), {
+      headers: modelsHeaders()
+    });
   } catch (error) {
     console.error("获取语音列表失败:", error);
     const fallbackModels = [

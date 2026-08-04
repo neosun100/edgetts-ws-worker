@@ -22,8 +22,8 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
 ## Why
 
 - 🎙️ **322 voices, 40+ languages** — every Microsoft neural voice, including multilingual ones.
-- ⚡ **True streaming** — streams raw PCM so playback starts on the first chunk and never
-  cuts off mid-sentence (container formats like MP3 can't be played incrementally — see
+- ⚡ **True streaming** — with `response_format: "pcm"`, playback starts on the first chunk
+  and runs to the end (container formats like MP3 can't be played incrementally — see
   [the streaming note](#streaming)).
 - 🧩 **OpenAI-compatible** — `POST /v1/audio/speech`, drop-in for the OpenAI TTS shape.
 - 🚀 **Concurrent synthesis** — long text is sentence-chunked and synthesized with a
@@ -86,7 +86,7 @@ No dependencies to install — the build and tests use only Node's built-ins.
 
 ```jsonc
 {
-  "input": "The text to speak.",   // required, ≤ 50000 chars
+  "input": "The text to speak.",   // required; see the length limits below
   "voice": "en-US-AvaNeural",       // or an OpenAI alias: alloy/echo/fable/onyx/nova/shimmer
   "speed": 1.0,                      // 0.25–4.0
   "pitch": 1.0,                      // 0.5–1.5
@@ -104,16 +104,27 @@ Returns the audio bytes with the matching `Content-Type` (`audio/mpeg`, `audio/w
 <a name="streaming"></a>
 #### Streaming
 
-Set `stream: true`. The server streams **raw PCM** regardless of `response_format`, because
-container formats (MP3/Opus/WAV) can't be decoded incrementally — a partial MP3 blob plays
-as a short *complete* clip and stops. The bundled web UI plays streamed PCM through the Web
-Audio API on a continuous timeline, so audio starts immediately and never truncates. For
-non-streaming requests you get a normal MP3/Opus/WAV file.
+Set `stream: true` and the server streams the synthesised chunks as they arrive, in
+whatever `response_format` you asked for.
+
+**Use `response_format: "pcm"` when you stream.** Container formats (MP3/Opus/WAV) cannot
+be decoded incrementally — a partial MP3 blob plays as a short *complete* clip and stops,
+which is exactly the 1.67s truncation this project was built to fix. The server does not
+override your choice; it streams what you request. The bundled web UI rewrites the format
+to `pcm` for you before sending a streaming request, and plays the result through the Web
+Audio API on a continuous timeline, so audio starts immediately and never truncates. A
+direct API caller has to make that choice itself.
+
+For non-streaming requests you get a normal MP3/Opus/WAV file.
 
 ### `GET /v1/models` · `GET /v1/models/public`
 
-Lists the available voices (322) in an OpenAI-models-like shape. Query filters:
-`?neural=true`, `?multilingual=true`.
+Lists the available voices (322) in an OpenAI-models-like shape. Both endpoints accept
+the same query filters:
+
+- `?multilingual=true` — only the multilingual voices (12 of 322).
+- `?neural=true` — accepted for backward compatibility, but a **no-op**: every voice
+  upstream is already a Neural voice, so nothing is filtered out.
 
 The list is cached in-process for 6 hours and served with
 `Cache-Control: public, max-age=21600`, so repeat calls don't hit upstream. If upstream
@@ -141,8 +152,23 @@ Serves the built-in web UI.
 | `API_KEY` | secret | Bearer token required for `/v1/audio/speech`. **Without it the Worker returns 503** rather than serving unauthenticated traffic. |
 | `ALLOW_ANONYMOUS` | var | Set to `"true"` to intentionally run open (no key). |
 
-> Request bodies are capped at 256KB and `input` at 50000 chars; exceeding either
-> returns 413 `payload_too_large`.
+### Length limits
+
+Request bodies are capped at 256KB (413 `payload_too_large`) and `input` at 50000
+characters (400 `input_too_long`).
+
+**Characters are not the binding constraint — chunk count is.** The text is split into
+chunks of `chunk_size` and each chunk costs one upstream subrequest, while Cloudflare
+allows 50 per invocation. The Worker therefore refuses more than 45 chunks with 413
+`too_many_chunks`, which at the default `chunk_size` of 300 is about 13500 characters.
+
+To synthesise longer text, raise `chunk_size` (up to 2000, so ~90000 characters worth of
+chunks) or split the text across requests. Coarser chunks mean fewer, longer upstream
+calls — slightly slower to first byte, but far more headroom.
+
+The check runs before any response byte is written, deliberately: a streaming request that
+exceeded the platform budget mid-flight used to end as HTTP 200 with a well-formed EOF, so
+a caller could not distinguish a truncated clip from a complete one.
 
 ## Development
 
