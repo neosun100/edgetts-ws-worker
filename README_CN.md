@@ -126,11 +126,21 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 | `response_format` | Content-Type | 流式 | 说明 |
 |---|---|---|---|
 | `mp3` | audio/mpeg | 非流式 | 默认，兼容性最好 |
-| `opus` | audio/webm | 非流式 | 高压缩 |
+| `opus` | audio/webm | 非流式 | 高压缩；**仅支持单分块**（见下） |
 | `wav` | audio/wav | 非流式 | 无损，体积大 |
 | `pcm` | audio/pcm | **流式** | 流式自动使用；不是 UI 选项 |
 
 > 不支持 AAC 与 FLAC —— 上游端点会返回 400 拒绝。
+
+**opus 必须落在单个分块内。** WebM 的 Cluster 时间戳是容器内相对的，每个分块一个容器拼接
+起来后，时间戳会在每个边界归零：实测 5 容器的响应回退 4 次、最大 pts 只有 10.85s，而单容器
+同样文本是 43.37s。音频本身不丢（Chrome 仍能解出完整长度），但进度条与拖动会失准。与其静默
+交付这种结果，会切成多块的请求直接返回 400 `opus_requires_single_chunk`；把 `chunk_size`
+调大（上限 2000，约合 2000 字符）或改用 mp3/wav 处理更长文本。
+
+另外，即使单分块，opus 的 `<audio>.duration` 也是 `null`：上游
+`webm-24khz-16bit-mono-opus` 的封装不声明 Duration 且 Segment 长度未知。这是上游行为，
+不是本 Worker 引入的；mp3 与 wav 都能正常报告时长。
 
 ## 配置
 

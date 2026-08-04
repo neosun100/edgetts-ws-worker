@@ -203,3 +203,126 @@ test('mp3 and pcm are still concatenated as raw bytes', async () => {
     );
   }
 });
+
+// ----------------------------------------------------------------- opus / WebM
+// Opus is the other container format, and it fails differently from WAV — which is why
+// the same `new Blob([...])` needed a different remedy rather than the same one.
+//
+// Measured against production, same text, opus:
+//   1 container  (chunk_size=2000): timestamps monotonic, max pts 43.37s
+//   5 containers (chunk_size=50):   4 timestamp rewinds, max pts only 10.85s
+// Audio is NOT lost — Chrome's decodeAudioData still returns the full 43.63s, versus
+// 43.40s for WAV — because WebM Clusters are self-describing and a decoder keeps reading.
+// But Cluster timestamps are container-relative, so concatenation restarts the clock and
+// the progress bar and seeking go wrong.
+//
+// Merging properly in a Worker means rewriting EBML (merge Segments, rebase every Cluster
+// timestamp across 278KB / 2179 packets, inject a top-level Duration) against a 10ms CPU
+// budget. Rejecting with an actionable message is the proportionate fix.
+//
+// Note this deliberately does NOT address `<audio>.duration === null` for opus: that is
+// inherent to the upstream webm-24khz-16bit-mono-opus streaming muxing (a single-chunk
+// response has no Duration element either), not something concatenation caused.
+
+const MULTI_CHUNK_TEXT = '这是一句用来触发多分块的中文文本。'.repeat(12); // 204 chars
+
+test('multi-chunk opus is refused with an actionable 400 before any upstream call', async () => {
+  __test__.resetTokenCache();
+  __test__.resetVoicesCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      speechRequest({
+        input: MULTI_CHUNK_TEXT,
+        voice: 'zh-CN-XiaoxiaoNeural',
+        response_format: 'opus',
+        chunk_size: 50, // -> 5 chunks
+      }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 400);
+    const json = await res.json();
+    assert.equal(json.error.code, 'opus_requires_single_chunk');
+    // Per the project's error contract: the actual count plus a way forward.
+    assert.match(json.error.message, /5/, 'states how many chunks it would produce');
+    assert.match(json.error.message, /chunk_size/, 'names the parameter to raise');
+    assert.match(json.error.message, /mp3|wav/, 'offers an alternative format');
+    assert.equal(mock.calls.synth, 0, 'refused before spending an upstream request');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('single-chunk opus still works', async () => {
+  // The escape hatch the error message points at has to actually work.
+  __test__.resetTokenCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      speechRequest({
+        input: MULTI_CHUNK_TEXT,
+        voice: 'zh-CN-XiaoxiaoNeural',
+        response_format: 'opus',
+        chunk_size: 2000,
+      }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('Content-Type'), 'audio/webm');
+    assert.equal(mock.calls.synth, 1, 'exactly one container, so no concatenation');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('the opus restriction does not leak into the other formats', async () => {
+  // mp3 frames are self-synchronising, pcm is headerless, and wav is merged properly —
+  // all three must still accept multi-chunk input.
+  for (const format of ['mp3', 'wav', 'pcm']) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const res = await worker.fetch(
+        speechRequest({
+          input: MULTI_CHUNK_TEXT,
+          voice: 'zh-CN-XiaoxiaoNeural',
+          response_format: format,
+          chunk_size: 50,
+        }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 200, format + ' must still accept multi-chunk input');
+      assert.ok(mock.calls.synth > 1, format + ' really was multi-chunk, got ' + mock.calls.synth);
+    } finally {
+      mock.restore();
+    }
+  }
+});
+
+test('streaming opus is refused too when it would span chunks', async () => {
+  // The check sits before the stream/non-stream branch on purpose: once streaming headers
+  // are out there is no way to report the problem.
+  __test__.resetTokenCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      speechRequest({
+        input: MULTI_CHUNK_TEXT,
+        voice: 'zh-CN-XiaoxiaoNeural',
+        response_format: 'opus',
+        chunk_size: 50,
+        stream: true,
+      }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 400, 'must be a clean error, not a broken stream');
+    assert.equal((await res.json()).error.code, 'opus_requires_single_chunk');
+    assert.equal(mock.calls.synth, 0);
+  } finally {
+    mock.restore();
+  }
+});

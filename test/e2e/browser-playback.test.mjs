@@ -409,3 +409,44 @@ test('a JSON error body still yields the server message', { skip: SKIP }, async 
     await configureApp();
   }
 });
+
+test('the UI can still use Opus with text longer than the default chunk size', { skip: SKIP }, async () => {
+  // Server-side, multi-chunk opus is refused (WebM concatenation restarts Cluster
+  // timestamps). The UI sends no chunk_size, so it would inherit the server default of
+  // 300 and every opus request over ~300 characters would fail — a regression introduced
+  // by the guard itself. getRequestBody() therefore asks for the maximum chunk size when
+  // opus is selected. This asserts the request the UI actually puts on the wire.
+  const out = await chrome.page.evaluate(`(async () => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+    vm.form.responseFormat = 'opus';
+    vm.form.inputText = '这是一句用来触发多分块的中文文本。'.repeat(12); // 204 chars
+    const opus = vm.getRequestBody();
+    vm.form.responseFormat = 'mp3';
+    const mp3 = vm.getRequestBody();
+    return { opusChunk: opus.chunk_size, opusFormat: opus.response_format, mp3Chunk: mp3.chunk_size };
+  })()`);
+  assert.equal(out.opusFormat, 'opus');
+  assert.equal(out.opusChunk, 2000, 'opus must request the maximum chunk size');
+  assert.equal(out.mp3Chunk, undefined, 'other formats keep the server default');
+
+  // And end to end: a long opus request must come back as audio, not a 400.
+  const played = await chrome.page.evaluate(`(async () => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+    vm.form.responseFormat = 'opus';
+    vm.form.inputText = '这是一句用来触发多分块的中文文本。'.repeat(12);
+    await vm.generateSpeech(false);
+    return { status: String(vm.status && vm.status.message), sent: null };
+  })()`);
+  assert.doesNotMatch(
+    played.status,
+    /opus_requires_single_chunk|400/,
+    'a UI user must not hit the single-chunk restriction, got ' + played.status
+  );
+  assert.equal(server.stats.lastBody.chunk_size, 2000, 'the server saw chunk_size=2000');
+
+  await chrome.page.evaluate(`(() => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+    vm.form.responseFormat = 'mp3';   // restore for later tests
+    return true;
+  })()`);
+});

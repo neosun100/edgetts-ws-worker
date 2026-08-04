@@ -334,6 +334,30 @@ async function handleSpeechRequest(request) {
       "too_many_chunks"
     );
   }
+  // Opus 是 WebM 容器，多分块只能裸拼接成 N 个独立容器，而 WebM 的 Cluster 时间戳是
+  // 容器内相对的：拼接后每个容器都从 0 重新计时。实测 5 个容器的响应里时间戳回退 4 次，
+  // 最大 pts 只有 10.85s（单容器同样文本是 43.37s），进度条与拖动因此彻底失准。
+  //
+  // 音频本身不丢（Chrome 的 decodeAudioData 仍解出完整 43.63s，与 WAV 的 43.40s 相当），
+  // 所以这不像 WAV 那样是静默数据丢失，但时间轴坏掉仍会让人以为音频被截断。
+  //
+  // 在 Worker 里正确合并需要重写 EBML：合并 Segment、逐个重定基 Cluster 时间戳（实测
+  // 278KB / 2179 个包）、再注入顶层 Duration。这远超单请求 10ms 的 CPU 预算，风险大于收益。
+  // 因此显式拒绝，并指出可行出路：调大 chunk_size 让它落回单分块（实测 ≤2000 字符时
+  // 上游只返回 1 个容器、时间戳单调），或换 mp3/wav。
+  //
+  // 注意：这不修 `<audio>.duration === null`。那是上游 webm-24khz-16bit-mono-opus 流式封装
+  // 的固有特性 —— 单分块响应同样没有 Duration 元素，与拼接无关，Worker 层无法便宜地补上。
+  if (contentType === "audio/webm" && textChunks.length > 1) {
+    return errorResponse(
+      `opus 不支持多分块：按 chunk_size=${safeChunkSize} 会切成 ${textChunks.length} 块，` +
+        `而 WebM 容器拼接后时间戳会在每块开头归零（进度条与拖动失准）。` +
+        `请调大 chunk_size（上限 ${LIMITS.MAX_CHUNK_SIZE}）使其落回单块，` +
+        `或改用 response_format 为 mp3 / wav。`,
+      400,
+      "opus_requires_single_chunk"
+    );
+  }
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
   if (stream) {
     return await streamVoice(textChunks, safeConcurrency, ...ttsArgs);
@@ -605,7 +629,8 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
     // 播放器读到第一个头里的 data 长度就停了，后面全部音频被静默丢弃。默认
     // chunk_size=300，所以约 300 字符以上的输入就会触发——用户听到的是被截断的
     // 语音，且响应是 200 + 合法 WAV，无法与正常结果区分。mp3/pcm 不受影响
-    // （前者帧自同步、后者无头部），opus/webm 无法在此层安全合并，见下。
+    // （前者帧自同步、后者无头部）。opus/webm 拼接后时间戳会归零，已在
+    // handleSpeechRequest 里用 opus_requires_single_chunk 提前拒绝，到不了这里。
     const audioBody =
       contentType === "audio/wav" && allAudioBlobs.length > 1
         ? await concatWavBlobs(allAudioBlobs, contentType)

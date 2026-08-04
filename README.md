@@ -139,11 +139,24 @@ Serves the built-in web UI.
 | `response_format` | Content-Type | Streaming | Notes |
 |---|---|---|---|
 | `mp3` | audio/mpeg | non-stream | default, best compatibility |
-| `opus` | audio/webm | non-stream | high compression |
+| `opus` | audio/webm | non-stream | high compression; **single-chunk only** (see below) |
 | `wav` | audio/wav | non-stream | lossless, large |
 | `pcm` | audio/pcm | **stream** | used automatically for streaming; not a UI option |
 
 > AAC and FLAC are **not** supported — the upstream endpoint rejects them with a 400.
+
+**Opus needs to fit in one chunk.** WebM Cluster timestamps are container-relative, so
+concatenating one container per chunk restarts the clock at every boundary: a 5-container
+response measured 4 timestamp rewinds and a maximum pts of 10.85s where the single-container
+version reached 43.37s. The audio is all there (Chrome still decodes the full length), but
+the progress bar and seeking are wrong. Rather than ship that silently, a request that would
+split into more than one chunk returns 400 `opus_requires_single_chunk`. Raise `chunk_size`
+(up to 2000, which covers ~2000 characters) or use mp3/wav for longer text.
+
+Also note `<audio>.duration` is `null` for opus even with a single chunk: the upstream
+`webm-24khz-16bit-mono-opus` muxing declares no Duration and an unknown-length Segment.
+That is upstream behaviour, not something this Worker introduces. mp3 and wav both report a
+duration normally.
 
 ## Configuration
 
