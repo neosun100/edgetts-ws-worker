@@ -2,6 +2,19 @@
 var DEFAULT_CONCURRENCY = 10;
 var DEFAULT_CHUNK_SIZE = 300;
 
+// 站点图标：docs/logo.svg 的精简版（去掉播放键、加粗声波），16px 下仍可辨识。
+var FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">' +
+  '<defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">' +
+  '<stop offset="0%" stop-color="#6ee7b7"/><stop offset="55%" stop-color="#38bdf8"/>' +
+  '<stop offset="100%" stop-color="#4f46e5"/></linearGradient></defs>' +
+  '<rect width="512" height="512" rx="96" fill="url(#g)"/><g fill="#fff">' +
+  '<rect x="104" y="206" width="44" height="100" rx="22" opacity="0.75"/>' +
+  '<rect x="172" y="146" width="44" height="220" rx="22" opacity="0.9"/>' +
+  '<rect x="240" y="86"  width="44" height="340" rx="22"/>' +
+  '<rect x="308" y="156" width="44" height="200" rx="22" opacity="0.9"/>' +
+  '<rect x="376" y="216" width="44" height="80"  rx="22" opacity="0.75"/>' +
+  '</g></svg>';
+
 // All tunable bounds live here rather than as magic numbers at the call sites.
 var LIMITS = {
   MAX_INPUT_CHARS: 50000,
@@ -44,12 +57,24 @@ async function handleRequest(request, env) {
   if (request.method === "OPTIONS") return handleOptions(request);
   const url = new URL(request.url);
   if (url.pathname === "/v1/models/public") return await handlePublicModelsRequest();
+  // favicon 必须在鉴权之前短路：否则浏览器自动发起的 /favicon.ico 会命中鉴权分支
+  // 返回 401，在 devtools 里留下一条无意义的错误。直接返回内嵌的 logo。
+  if (url.pathname === "/favicon.ico" || url.pathname === "/favicon.svg") {
+    return new Response(FAVICON_SVG, {
+      headers: {
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "public, max-age=604800",
+        ...makeCORSHeaders()
+      }
+    });
+  }
   if (url.pathname === "/" || url.pathname === "/index.html") {
     return new Response(getHtmlContent(), {
       headers: {
         "Content-Type": "text/html;charset=UTF-8",
-        "Cache-Control": "public, max-age=86400"
-        // 缓存1d
+        // 5 分钟 + must-revalidate：部署后几分钟内自然生效，不必强刷。
+        // 之前是 max-age=86400（1 天），每次发版都得让用户手动硬刷才能看到新版。
+        "Cache-Control": "public, max-age=300, must-revalidate"
       }
     });
   }

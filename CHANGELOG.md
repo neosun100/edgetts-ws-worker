@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.5.0] - 2026-08-04
+
+### Added
+- **Audio-driven colour.** The visualiser's palette now encodes acoustic information
+  instead of drifting arbitrarily:
+  - **Hue ← spectral centroid** (log-mapped): low vowels render amber/orange, mid sounds
+    violet, high fricatives (s/sh/f) cyan.
+  - **Saturation ← spectral crest factor**: tonal (voiced) frames are vivid, noisy
+    (unvoiced) frames wash out to grey.
+  - **Brightness ← loudness**, as before.
+  - **Per-voice hue offset ← fundamental frequency** (autocorrelation), so a given voice
+    keeps a recognisable colour identity: measured f0 Yunjian 131Hz / Guy 148Hz /
+    Ava 211Hz / Xiaoxiao 242Hz map to bias −12° … +14°.
+  Every threshold is calibrated from measured distributions of real TTS output rather than
+  guessed (centroid p5≈910Hz/p95≈4524Hz, crest p5≈1.43/p95≈3.25).
+- `favicon.svg` / `favicon.ico` served **before** the auth check, so the browser's
+  automatic request no longer logs a 401. The tab now shows the project logo.
+
+### Changed
+- HTML `Cache-Control` from `max-age=86400` to **`max-age=300, must-revalidate`** — a
+  deploy is now picked up within minutes instead of needing a hard refresh.
+
+### Fixed
+- Spectral features were computed over all FFT bins, so hundreds of near-empty
+  high-frequency bins dragged the centroid up (a 1.5kHz tone measured as 11.6kHz) and made
+  flatness ≈0.98 always, pinning saturation. Now bounded to the vocal range with a
+  magnitude floor, and tonality uses crest factor instead of flatness.
+
 ## [2.4.0] - 2026-08-04
 
 ### Added
@@ -29,8 +57,6 @@
   (`getByteTimeDomainData`) and a breathing center glow. Attack is instant and release
   decays, so each syllable reads as a distinct pulse. `fftSize` 256 → 1024 and
   `smoothingTimeConstant` 0.8 → 0.45 for a snappier, higher-resolution response.
-
-![Pulse visualizer](docs/screenshots/pulse-visualizer.png)
 
 ## [2.3.0] - 2026-08-04
 

@@ -171,13 +171,31 @@ test('GET / serves the HTML UI without auth', async () => {
     const res = await worker.fetch(req('/'), {}, {}); // env {} — would be 503 for API paths
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('Content-Type'), 'text/html;charset=UTF-8');
-    assert.equal(res.headers.get('Cache-Control'), 'public, max-age=86400');
+    // Short TTL + revalidate so a deploy shows up within minutes instead of needing a
+    // hard refresh (it used to be max-age=86400).
+    assert.equal(res.headers.get('Cache-Control'), 'public, max-age=300, must-revalidate');
     const html = await res.text();
     // ui/index.html opens with a newline before the doctype, so trim before matching.
     assert.ok(html.trimStart().startsWith('<!DOCTYPE'), 'body starts with <!DOCTYPE');
     assert.match(html, /<html lang="zh-Hans">/);
     assert.equal(html, UI, 'served bytes are exactly ui/index.html');
     assert.equal(mock.calls.token, 0);
+  });
+});
+
+test('favicon is served before auth (no 401 in devtools) for .ico and .svg', async () => {
+  await withMock({}, async (mock) => {
+    for (const path of ['/favicon.ico', '/favicon.svg']) {
+      // Even with an API_KEY bound, the browser's automatic favicon request must not 401.
+      for (const env of [{}, { API_KEY: 's3cret-key' }]) {
+        const res = await worker.fetch(req(path), env, {});
+        assert.equal(res.status, 200, path + ' should bypass auth');
+        assert.equal(res.headers.get('Content-Type'), 'image/svg+xml');
+        const body = await res.text();
+        assert.match(body, /^<svg /, 'serves an SVG');
+      }
+    }
+    assert.equal(mock.calls.token, 0, 'favicon never touches upstream');
   });
 });
 

@@ -39,8 +39,13 @@ Open `/` in a browser. All 322 voices are filterable by language, region, gender
 `ShortName` with a one-click copy button, so it drops straight into an API call. Playback
 draws a three-layer visualizer — a **Siri-style pulsing ring**, **particle bursts** on each
 syllable onset, and a **scrolling pulse waveform** where every syllable travels along the
-time axis. A **light / dark** theme toggle (top-right) is remembered across visits and the
-palette adapts to each theme.
+time axis. A **light / dark** theme toggle (top-right) is remembered across visits.
+
+The colour is **derived from the audio**, not random: hue follows the spectral centroid
+(low vowels → amber, high fricatives → cyan), saturation follows spectral crest factor
+(tonal → vivid, noisy → grey), brightness follows loudness, and each voice gets a stable
+hue offset from its fundamental frequency — so a deep voice always reads warmer than a
+high one. All thresholds are calibrated against measured distributions from real TTS output.
 
 ![Visualizer — dark theme](docs/screenshots/viz-dark.png)
 ![Visualizer — light theme](docs/screenshots/viz-light.png)

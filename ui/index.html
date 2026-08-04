@@ -6,6 +6,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>🎙️ EdgeTTS - 现代化多语言语音合成服务</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
     :root {
       --primary-color: #4f46e5;
@@ -1034,6 +1035,7 @@
           mediaElSource: null,   // <audio> 的 MediaElementSource（每个元素只能建一次）
           vizRAF: null,          // 可视化动画帧句柄
           vizActive: false,      // 是否显示声纹
+          vizDebug: null,        // 当前配色(hue/sat/rms)，供调试与自动化验证
           audioSrc: '',
           downloadUrl: '', // 添加下载链接
           showDownloadBtn: false, // 控制下载按钮显示
@@ -1759,9 +1761,44 @@
             new Array(RING_PTS).fill(0),
             new Array(RING_PTS).fill(0),
           ];
-          let hue = 190;                    // 色相在冷色区间内缓慢漂移
-          let huePhase = 0;
+          // 颜色由音频本身决定，不是随机漂移：
+          //   色相 H  <- 谱质心(对数)  低频元音=琥珀/橙 -> 中频=紫/洋红 -> 高频擦音=青
+          //   饱和 S  <- 谱平坦度(反向) 浊音(有音调)=浓郁, 清音/噪声=发灰
+          //   亮度 L  <- 音量 RMS
+          //   基准偏移 <- 音色基频 f0   低音音色整体偏暖, 高音音色整体偏冷
+          // LO/HI 与饱和度区间都用真实 TTS 音频的分位数标定过(见下面注释的实测值)。
+          // 按浏览器内实测的真实 TTS 分位数标定：质心 p5≈910Hz, p50≈3170Hz, p95≈4524Hz
+          const CENT_LO = 850, CENT_HI = 4800;
+          const LOG_LO = Math.log(CENT_LO), LOG_SPAN = Math.log(CENT_HI) - LOG_LO;
+          const nyq = (this.audioContext && this.audioContext.sampleRate ? this.audioContext.sampleRate : 24000) / 2;
+          let hue = 120;                    // 由质心驱动
+          let sat = 90;                     // 由平坦度驱动
+          let voiceHueBias = 0;             // 由音色 f0 驱动的基准偏移
+          let frameNo = 0;
           let smoothed = 0;
+
+          // 自相关基频估计：在 70~350Hz 找最强周期。相关性不足则认为是清音，返回 0。
+          const estimateF0 = (buf, sampleRate) => {
+            const lagMin = Math.floor(sampleRate / 350);
+            const lagMax = Math.min(Math.floor(sampleRate / 70), buf.length - 1);
+            if (lagMax <= lagMin) return 0;
+            let best = 0, bestLag = -1, energy = 0;
+            for (let i = 0; i < buf.length; i++) {
+              const v = (buf[i] - 128) / 128;
+              energy += v * v;
+            }
+            if (energy < 1) return 0;
+            for (let lag = lagMin; lag <= lagMax; lag++) {
+              let acc = 0;
+              // 步长 2 采样：精度足够且减半计算量
+              for (let i = 0; i + lag < buf.length; i += 2) {
+                acc += ((buf[i] - 128) / 128) * ((buf[i + lag] - 128) / 128);
+              }
+              if (acc > best) { best = acc; bestLag = lag; }
+            }
+            if (bestLag < 0 || best / (energy / 2) < 0.3) return 0;   // 周期性太弱
+            return sampleRate / bestLag;
+          };
           let prevRms = 0;                  // 上一帧 RMS，用于 onset 检测
           let ringPhase = 0;
           let lastT = 0;
@@ -1800,14 +1837,61 @@
             // 快起慢落 —— 脉冲感的关键
             smoothed = peak > smoothed ? peak : smoothed * 0.82 + peak * 0.18;
             hist.push(smoothed); hist.shift();
-            // 色相在 165°~285°(青→蓝→紫)之间来回漂移，而不是绕满 360°：
-            // 绕满会经过黄绿区间，在白底上又脏又发灰。基准band上限留出余量，
-            // 让脉冲(+55)与火花(+70)的偏移之后仍落在洋红以内、不越到红色。
-            // 参数经实测标定：8 秒内完整扫过 150°→260° 的色带，且加上火花的 +70
-            // 偏移后正好停在 330°(洋红)不溢出到红色。0.06 那种速度 10s 只走 42°，
-            // 整段播放会是一个颜色，看着像"死色"。
-            huePhase += dt * 0.8;
-            hue = 150 + (Math.sin(huePhase) * 0.5 + 0.5) * 110;
+
+            // ---- 从频谱算出「此刻在发什么音」，用来决定颜色 ----
+            // 谱质心 = 频谱的重心，即声音的"亮度"：元音低、擦音(s/sh/f)高
+            // 谱平坦度 = 几何均值/算术均值，区分浊音(有音调，值低)与噪声(值高)
+            // 只统计人声频段(<=8kHz)且幅度高于噪声底的 bin。
+            // 关键：不设门限会被几百个近乎空的高频 bin 拖偏 —— 实测中频浊音的质心
+            // 会被算成 11.6kHz、平坦度恒为 0.98(均匀噪声底看起来"最平坦")，
+            // 于是颜色永远卡在青色、饱和度永远 50%。
+            const MAG_FLOOR = 0.06;                     // ≈ 15/255
+            const hiBin = Math.min(freq.length - 1, Math.floor((8000 / nyq) * freq.length));
+            let sum = 0, wsum = 0, nb = 0, maxMag = 0;
+            for (let i = 1; i <= hiBin; i++) {          // 跳过 bin 0(DC)
+              const mag = freq[i] / 255;
+              if (mag < MAG_FLOOR) continue;
+              const f = (i / freq.length) * nyq;
+              sum += mag; wsum += mag * f;
+              if (mag > maxMag) maxMag = mag;
+              nb++;
+            }
+            // 音调性用「峰值/均值」(crest factor)而不是谱平坦度：平坦度只在过了门限的
+            // bin 上算，结果恒接近 1(实测 0.78~0.99 全部撞上限)，饱和度永远是 50%。
+            // crest 则能真正分开：纯音能量集中 -> 峰值远高于均值；噪声 -> 峰均接近。
+            const crest = nb > 0 ? maxMag / (sum / nb) : 1;
+            if (sum > 0.02 && nb >= 3) {
+              const centroid = wsum / sum;
+              // 对数映射：质心跨 10 倍(735Hz~7.5kHz)，线性映射会把 95% 时间挤在一个色里
+              const t = Math.max(0, Math.min(1, (Math.log(Math.max(CENT_LO, Math.min(CENT_HI, centroid))) - LOG_LO) / LOG_SPAN));
+              const targetHue = 35 + t * 165;          // 35°琥珀 -> 200°青
+              // crest 高(能量集中/有音调) -> 浓郁；crest 低(噪声/擦音) -> 发灰
+              // 实测 crest：p5≈1.43(噪声/擦音) p50≈2.22 p95≈3.25(浓郁浊音)
+              const tone = Math.max(0, Math.min(1, (crest - 1.4) / 1.9));
+              const targetSat = 48 + tone * 47;        // 48%(灰) ~ 95%(浓)
+              // 平滑，避免逐帧闪色（音素切换本身已经很快）
+              hue = hue * 0.72 + targetHue * 0.28;
+              sat = sat * 0.75 + targetSat * 0.25;
+            }
+            // ---- 音色身份：用基频 f0 给整段一个稳定的色相偏移 ----
+            // 自相关法(而非取频谱峰值——峰值会抓到谐波，实测把男声误判得比女声还高)。
+            // 只在浊音帧更新，慢速逼近，所以同一个音色整段颜色基调是稳定的。
+            // 实测 f0 中位数：Yunjian 131Hz / Guy 148Hz / Ava 211Hz / Xiaoxiao 242Hz
+            if (rms > 0.05 && (frameNo & 3) === 0) {     // 每 4 帧算一次，省 CPU
+              const f0 = estimateF0(wave, nyq * 2);
+              if (f0 > 0) {
+                // 130Hz(低音) -> -18°(更暖)  240Hz(高音) -> +18°(更冷)
+                const tf = Math.max(0, Math.min(1, (f0 - 130) / 110));
+                const targetBias = -18 + tf * 36;
+                voiceHueBias = voiceHueBias * 0.9 + targetBias * 0.1;
+              }
+            }
+            frameNo++;
+
+            // h0 = 此刻音素的色相 + 音色身份偏移（低音音色整体更暖、高音更冷）
+            const h0 = hue + voiceHueBias;
+            // 暴露当前配色供调试/自动化验证（颜色是否真由音频驱动）
+            this.vizDebug = { hue: h0, sat: sat, rms: rms, bias: voiceHueBias };
             ringPhase += dt * 0.45;
 
             // 环形占左侧一个方形区域，脉冲占其右侧剩余空间。
@@ -1829,11 +1913,11 @@
                 if (v <= 0.001) continue;
                 const age = i / SLOTS;
                 const barH = Math.max(1.5 * dpr, Math.pow(v, 0.75) * mid * 0.80);
-                const h = hue + age * 55;                 // 时间轴渐变，幅度收窄以留在冷色区
+                const h = h0 + age * 18;                  // 沿时间轴的轻微偏移，不掩盖质心语义
                 const alpha = 0.22 + age * 0.72;
                 const light = 52 + v * 26 + LB;
                 const x = pulseX0 + i * slotW + (slotW - barW) / 2;
-                ctx.fillStyle = 'hsla(' + h + ',95%,' + light + '%,' + alpha + ')';
+                ctx.fillStyle = 'hsla(' + h + ',' + sat + '%,' + light + '%,' + alpha + ')';
                 ctx.beginPath();
                 ctx.roundRect(x, mid - barH, barW, barH * 2, barW / 2);
                 ctx.fill();
@@ -1841,9 +1925,9 @@
               // 中心脉冲光带，随音量呼吸
               const glowH = (1.5 + rms * 22) * dpr;
               const glow = ctx.createLinearGradient(0, mid - glowH, 0, mid + glowH);
-              glow.addColorStop(0, 'hsla(' + hue + ',100%,' + (70 + LB) + '%,0)');
-              glow.addColorStop(0.5, 'hsla(' + hue + ',100%,' + (78 + LB) + '%,' + ((0.3 + rms * 0.5) * GLOW) + ')');
-              glow.addColorStop(1, 'hsla(' + hue + ',100%,' + (70 + LB) + '%,0)');
+              glow.addColorStop(0, 'hsla(' + h0 + ',' + sat + '%,' + (70 + LB) + '%,0)');
+              glow.addColorStop(0.5, 'hsla(' + h0 + ',' + sat + '%,' + (78 + LB) + '%,' + ((0.3 + rms * 0.5) * GLOW) + ')');
+              glow.addColorStop(1, 'hsla(' + h0 + ',' + sat + '%,' + (70 + LB) + '%,0)');
               ctx.fillStyle = glow;
               ctx.fillRect(pulseX0, mid - glowH, pulseW, glowH * 2);
 
@@ -1852,8 +1936,8 @@
               ctx.lineWidth = 1.4 * dpr;
               ctx.lineJoin = 'round';
               ctx.shadowBlur = 9 * dpr * GLOW;
-              ctx.shadowColor = 'hsla(' + ((hue + 40) % 360) + ',100%,' + (70 + LB) + '%,0.65)';
-              ctx.strokeStyle = 'hsla(' + ((hue + 40) % 360) + ',95%,' + (82 + LB * 1.4) + '%,' + (isDark ? 0.5 : 0.7) + ')';
+              ctx.shadowColor = 'hsla(' + (h0 + 15) + ',' + sat + '%,' + (70 + LB) + '%,0.65)';
+              ctx.strokeStyle = 'hsla(' + (h0 + 15) + ',' + sat + '%,' + (82 + LB * 1.4) + '%,' + (isDark ? 0.5 : 0.7) + ')';
               ctx.beginPath();
               const px = Math.max(1, Math.floor(wave.length / Math.max(1, pulseW)));
               let first = true;
@@ -1869,8 +1953,8 @@
             // ================= 环形律动（左区，Siri 风格） =================
             // 中心呼吸光晕
             const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, ringR * (1 + rms * 0.5));
-            halo.addColorStop(0, 'hsla(' + hue + ',100%,' + (75 + LB) + '%,' + ((0.20 + rms * 0.45) * GLOW) + ')');
-            halo.addColorStop(1, 'hsla(' + hue + ',100%,' + (60 + LB) + '%,0)');
+            halo.addColorStop(0, 'hsla(' + h0 + ',' + sat + '%,' + (75 + LB) + '%,' + ((0.20 + rms * 0.45) * GLOW) + ')');
+            halo.addColorStop(1, 'hsla(' + h0 + ',' + sat + '%,' + (60 + LB) + '%,0)');
             ctx.fillStyle = halo;
             ctx.beginPath();
             ctx.arc(cx, cy, ringR * (1 + rms * 0.5), 0, Math.PI * 2);
@@ -1884,18 +1968,18 @@
             // 处每帧都出现一个尖锐凹口 —— 实测 bin0=26 而 bin1=89、bin2=141。
             const layers = [
               { lo: 0.008, hi: 0.090, amp: 0.70, dir:  1, w: 2.4, a: 0.95, hOff:   0, base: 0.36 },
-              { lo: 0.030, hi: 0.170, amp: 0.56, dir: -1, w: 1.9, a: 0.78, hOff:  32, base: 0.57 },
-              { lo: 0.080, hi: 0.300, amp: 0.44, dir:  1, w: 1.5, a: 0.58, hOff:  64, base: 0.76 },
+              { lo: 0.030, hi: 0.170, amp: 0.56, dir: -1, w: 1.9, a: 0.78, hOff:  14, base: 0.57 },
+              { lo: 0.080, hi: 0.300, amp: 0.44, dir:  1, w: 1.5, a: 0.58, hOff:  28, base: 0.76 },
             ];
             ctx.save();
             ctx.lineJoin = 'round';
             for (let li = 0; li < layers.length; li++) {
               const L = layers[li];
-              const h = (hue + L.hOff) % 360;
+              const h = h0 + L.hOff;
               ctx.lineWidth = L.w * dpr;
               ctx.shadowBlur = 16 * dpr * GLOW;
-              ctx.shadowColor = 'hsla(' + h + ',100%,' + (68 + LB) + '%,0.85)';
-              ctx.strokeStyle = 'hsla(' + h + ',95%,' + (74 + LB * 1.3) + '%,' + L.a + ')';
+              ctx.shadowColor = 'hsla(' + h + ',' + sat + '%,' + (68 + LB) + '%,0.85)';
+              ctx.strokeStyle = 'hsla(' + h + ',' + sat + '%,' + (74 + LB * 1.3) + '%,' + L.a + ')';
 
               // 先算出每个角度的半径，再做环形移动平均 —— 频谱逐 bin 抖动很大，
               // 不平滑的话环会画成"毛线团"而不是优雅的涟漪。
@@ -1959,7 +2043,7 @@
                   vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
                   life: 1, decay: 0.7 + Math.random() * 0.8,
                   r: (1.4 + Math.random() * 2.8) * dpr,
-                  h: hue + 10 + Math.random() * 60,       // 火花色相也留在冷色区
+                  h: h0 + Math.random() * 25,             // 火花继承当下音素的色相
                 });
               }
             }
@@ -1975,8 +2059,8 @@
               const a = Math.pow(p.life, 1.3);
               ctx.globalAlpha = a;
               ctx.shadowBlur = 14 * dpr * GLOW;             // 更强的辉光，像火花
-              ctx.shadowColor = 'hsla(' + p.h + ',100%,' + (75 + LB) + '%,1)';
-              ctx.fillStyle = 'hsla(' + p.h + ',95%,' + (78 + (1 - p.life) * 16 + LB * 1.3) + '%,1)';
+              ctx.shadowColor = 'hsla(' + p.h + ',' + sat + '%,' + (75 + LB) + '%,1)';
+              ctx.fillStyle = 'hsla(' + p.h + ',' + sat + '%,' + (78 + (1 - p.life) * 16 + LB * 1.3) + '%,1)';
               ctx.beginPath();
               ctx.arc(p.x, p.y, p.r * (0.45 + a * 1.0), 0, Math.PI * 2);
               ctx.fill();
