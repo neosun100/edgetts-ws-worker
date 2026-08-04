@@ -96,7 +96,9 @@ export async function launchChrome({ port = 0, timeoutMs = 15000 } = {}) {
   }
   if (!wsUrl) {
     proc.kill('SIGKILL');
-    await rm(userDataDir, { recursive: true, force: true });
+    // Same ENOTEMPTY race as in close() — a failed launch must not turn into a different,
+    // more confusing error while cleaning up after itself.
+    try { await rm(userDataDir, { recursive: true, force: true }); } catch { /* /tmp will reap it */ }
     throw new Error('Chrome debugger did not come up in time');
   }
 
@@ -141,7 +143,25 @@ export async function launchChrome({ port = 0, timeoutMs = 15000 } = {}) {
     async close() {
       try { browser.close(); } catch { /* already gone */ }
       proc.kill('SIGKILL');
-      await rm(userDataDir, { recursive: true, force: true });
+      // Wait for the process to actually die before deleting its profile. Chrome keeps
+      // writing to the profile directory as it tears down, so on Linux rm raced it and
+      // threw ENOTEMPTY (seen on the GitHub runner:
+      // "rmdir '/tmp/edgetts-cdp-*/Default/Storage/ext/.../def'"). That rejection came
+      // from an after() hook, which orphaned the node children and left the job hanging
+      // until its timeout. macOS does not reproduce it — deleting open files is allowed.
+      await new Promise((resolve) => {
+        if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+        proc.once('exit', resolve);
+        setTimeout(resolve, 3000).unref();   // never block teardown on this
+      });
+      // Cleanup of a temp dir must never fail a test: retry once, then give up quietly.
+      // The OS reaps /tmp anyway, so a leftover directory is not worth a red build.
+      try {
+        await rm(userDataDir, { recursive: true, force: true });
+      } catch {
+        await new Promise((r) => setTimeout(r, 300).unref());
+        try { await rm(userDataDir, { recursive: true, force: true }); } catch { /* leave it to /tmp */ }
+      }
     },
   };
 }
