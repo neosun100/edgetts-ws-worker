@@ -17,14 +17,18 @@ test:
       node --version
     - |
       node --check src/worker.js
-    - |
-      npm test
-    - |
-      npm run coverage || true
+    # Build before testing: dist/ is gitignored, so it does not exist on a fresh
+    # clone, and the tests that read dist/worker.js (BUG#7c escaping regression, the
+    # browser e2e suite) would skip or fail. This image has no Chrome, so the browser
+    # tests still skip here — but BUG#7c now actually runs.
     - |
       npm run build
     - |
       node --check dist/worker.js
+    - |
+      npm test
+    - |
+      npm run coverage || true
     - |
       if grep -q "__test__" dist/worker.js; then
         echo "ERROR dist/worker.js still contains __test__ export"

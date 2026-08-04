@@ -25,17 +25,24 @@ jobs:
       - name: Syntax check
         run: node --check src/worker.js
 
-      - name: Unit + integration + regression tests
-        run: npm test
-
-      - name: Coverage (informational)
-        run: npm run coverage || true
-
+      # Build BEFORE testing. dist/ is gitignored, so on a fresh checkout it does not
+      # exist, and the browser e2e tests plus the BUG#7c escaping regression read
+      # dist/worker.js. With build after test, those 6 tests failed on every CI run
+      # (red since v2.8.0) while passing locally, where a stale dist/ was lying around.
       - name: Build worker bundle
         run: npm run build
 
       - name: Verify build output is a valid module
         run: node --check dist/worker.js
+
+      - name: Unit + integration + regression tests
+        run: npm test
+
+      - name: Browser e2e (headless Chrome, no credentials needed)
+        run: npm run test:e2e
+
+      - name: Coverage (informational)
+        run: npm run coverage || true
 
       - name: Ensure test-only exports are stripped from the bundle
         run: |

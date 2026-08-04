@@ -27,11 +27,12 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Test before deploy
-        run: npm test
-
+      # Build first: dist/ is gitignored and several tests read it (see ci.yml).
       - name: Build
         run: npm run build
+
+      - name: Test before deploy
+        run: npm test
 
       - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v3
