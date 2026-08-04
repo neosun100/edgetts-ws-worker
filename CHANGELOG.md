@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.7.1] - 2026-08-04
+
+### Added
+- **`test/e2e/legacy-timestamps.test.mjs`（3 例）** —— 锁定 legacy NDJSON worker 的逐词
+  时间戳契约：词序正确、`offset` 单调递增（逐词高亮的前提）、NDJSON 事件构成
+  （audio + 恰好 4 个 word + 恰好 1 个 done、done 在最后）。另有一条测试**固化「REST
+  端点无时间戳」这一约束**：若微软将来补上词边界，该测试会开始失败，即为可以合并的信号。
+
+### Changed
+- **ROADMAP P1-7 结论反转：从「待办」改为「架构上无法合并」**，附实测证据。
+  原计划是给 `edgetts-proxy` 加 `/timestamps` 端点或支持 `response_format: ndjson`。
+  实测后确认走不通：
+  - REST 端点（`cognitiveservices/v1`）试了裸请求、`X-Microsoft-OutputFormat-WordBoundary`、
+    `Ocp-Apim-Subscription-Key` 三种组合，**均只回纯音频**，响应头零时间戳字段
+  - 词边界只存在于 WebSocket 协议，而出站 WS 只能跑在 `*.workers.dev`（自定义域名下
+    CF 代理层破坏握手）—— 同一个自定义域名的 worker 物理上无法同时提供两者
+  ROADMAP 与双语 README 现在明确写出「要时间戳请调 legacy 部署」及其地址与响应结构。
+- **`legacy/` 去留裁定：保留**。它不是死代码，是逐词时间戳的唯一来源（`pte-wfd-216` 依赖），
+  且已由 e2e 锁定契约 —— 这样它就不再是「lint 豁免的永不清理目录」。
+- 测试 181 → **184**（E2E 6 → 9）。
+
 ## [2.7.0] - 2026-08-04
 
 ### Added

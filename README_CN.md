@@ -154,8 +154,20 @@ handler 测试对着 mock 上游跑，因此离线且确定。E2E 测试打真�
 
 ## 配套与遗留
 
-- `legacy/worker-ndjson.js` —— 最初的 WebSocket + NDJSON 版本，带**逐词时间戳**（`WordBoundary`）。
-  因下游项目仍在用而保留；合并时间戳能力到主 worker 的计划见 [ROADMAP](ROADMAP.md)。
+- `legacy/worker-ndjson.js` —— 最初的 WebSocket + NDJSON 版本，也是**逐词时间戳**
+  （`WordBoundary`）的**唯一来源**。这个能力无法合并进主 worker：词边界只存在于 WebSocket
+  协议，而出站 WebSocket 只能跑在 `*.workers.dev`（自定义域名下 CF 代理层会破坏握手）。
+  实测用多种 header 组合请求 REST 端点，返回的都是纯音频、零时间戳字段。所以需要时间戳
+  （如逐词高亮）时请调 legacy 部署：
+
+  ```bash
+  curl -X POST https://edgetts-ws-worker.neosun808.workers.dev/ \
+    -H 'Content-Type: application/json' \
+    -d '{"input":"你好世界","voice":"zh-CN-XiaoxiaoNeural"}'
+  # -> { audio: "<base64 mp3>", timestamps: [{ text, offset, duration }, ...] }
+  ```
+
+  其契约由 `test/e2e/legacy-timestamps.test.mjs` 锁定。完整分析见 [ROADMAP](ROADMAP.md)。
 - [edgetts-ws](https://github.com/neosun100/edgetts-ws) —— 同思路的 Python 服务端版本。
 
 ## 许可

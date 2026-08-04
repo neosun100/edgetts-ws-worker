@@ -172,9 +172,22 @@ deterministic. E2E tests hit the real service and are skipped unless `EDGETTS_E2
 
 ## Companion & legacy
 
-- `legacy/worker-ndjson.js` — the original WebSocket + NDJSON variant with **word-level
-  timestamps** (`WordBoundary`). Kept because downstream projects use it; see [ROADMAP](ROADMAP.md)
-  for the plan to merge timestamp support into the main worker.
+- `legacy/worker-ndjson.js` — the original WebSocket + NDJSON variant, and the **only**
+  source of **word-level timestamps** (`WordBoundary`). These cannot be merged into the
+  main worker: word boundaries exist only in the WebSocket protocol, and outbound
+  WebSocket only works on `*.workers.dev` (a custom domain's proxy layer breaks the
+  handshake). Probing the REST endpoint with several header combinations returned audio
+  with no timestamp data at all. So if you need timestamps — e.g. karaoke-style
+  highlighting — call the legacy deployment:
+
+  ```bash
+  curl -X POST https://edgetts-ws-worker.neosun808.workers.dev/ \
+    -H 'Content-Type: application/json' \
+    -d '{"input":"Hello world","voice":"en-US-AvaNeural"}'
+  # -> { audio: "<base64 mp3>", timestamps: [{ text, offset, duration }, ...] }
+  ```
+
+  Its contract is pinned by `test/e2e/legacy-timestamps.test.mjs`. See [ROADMAP](ROADMAP.md#7-wordboundary-时间戳--架构上无法合并2026-08-04-实测结论) for the full analysis.
 - [edgetts-ws](https://github.com/neosun100/edgetts-ws) — the same idea as a Python server.
 
 ## License

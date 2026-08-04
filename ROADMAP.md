@@ -138,11 +138,33 @@ key 明文存 `localStorage`，任何 XSS 或同源脚本可读。当前无 `v-h
 - 结构化日志（JSON），字段含 voice/format/chunks/耗时/是否重试
 - 关键指标告警：5xx 率、上游 401 率、p99 延迟
 
-### 7. 恢复 WordBoundary 时间戳能力
-`legacy/worker-ndjson.js` 有逐词时间戳（`pte-wfd-216` 的逐词高亮依赖它），但走的是
-WebSocket + NDJSON 协议；生产 `edgetts-proxy` 走 REST 裸流，没有时间戳。
-建议：在 `edgetts-proxy` 上增加一个 `/v1/audio/speech/timestamps` 端点，
-或让 `response_format` 支持 `ndjson` 以合并两套实现。
+### 7. WordBoundary 时间戳 · 🔒 架构上无法合并（2026-08-04 实测结论）
+
+原计划是「在 `edgetts-proxy` 加个 `/timestamps` 端点或支持 `response_format: ndjson`，
+把两套实现合并」。实测后确认**这条路走不通**，改为明确记录约束与可用路径。
+
+**实测证据：**
+
+| 检验项 | 结果 |
+|---|---|
+| REST 端点（`cognitiveservices/v1`）能否返回词边界 | ❌ 试了裸请求、`X-Microsoft-OutputFormat-WordBoundary`、`Ocp-Apim-Subscription-Key` 三种组合，**均只回纯音频**（15264B，响应头零时间戳字段） |
+| legacy WebSocket 版是否还有时间戳 | ✅ 完好：非流式返回 4 词精确 `offset`/`duration`；NDJSON 流式返回 19 audio + 4 word + 1 done |
+
+**为什么不能合并：** 词边界只存在于 WebSocket 协议（`wordBoundaryEnabled` + `Path:audio.metadata`
+消息），而**出站 WebSocket 只能跑在 `*.workers.dev`** —— 自定义域名下 CF 代理层会破坏到 Bing
+的 WS 握手（见文末架构约束 #1）。所以同一个自定义域名的 worker 里，物理上不可能同时提供
+REST 裸流与 WS 时间戳。
+
+**当前可用路径（下游按需选择）：**
+
+| 需求 | 用哪个 | 地址 |
+|---|---|---|
+| 语音合成（主用） | 生产 REST worker | `https://edgetts.aws.xin/v1/audio/speech` |
+| **逐词时间戳**（如 `pte-wfd-216` 的逐词高亮） | legacy NDJSON worker | `https://edgetts-ws-worker.neosun808.workers.dev/` |
+
+**因此 `legacy/` 保留而非删除** —— 它不是死代码，是唯一的时间戳来源，已由
+`test/e2e/legacy-timestamps.test.mjs` 锁定契约（词序、offset 单调递增、NDJSON 事件构成）。
+若微软将来给 REST 端点加上词边界，那个 e2e 里的第三条测试会开始失败，届时即可合并。
 
 ### 8. CI ✅ 已完成
 GitLab CI（`.gitlab-ci.yml`，主链路）+ GitHub Actions（备份）双跑：
@@ -159,7 +181,7 @@ syntax check + 全量测试 + coverage + build + 校验 dist 不含 `__test__`�
 | ~~语音列表缓存~~ ✅ | 已完成：进程内 6 小时缓存 + `Cache-Control: max-age=21600`；并发合并；上游故障时返回过期缓存(留 warn 痕迹)，冷启动失败才降级到内置列表(`no-store`) |
 | `cleanText` 的容错来源注释 | 多处正则清理未说明脏数据来源，半年后无人知道是否还需要 |
 | 前端 e2e | 当前只有服务端单测。可用 Playwright 验证「流式播放不中断」这一核心回归 |
-| `legacy/` 的去留 | 按「lint 豁免目录 = 永不清理的目录」原则，应明确：要么迁移合并（见 P1-7），要么删除 |
+| ~~`legacy/` 的去留~~ ✅ | 已裁定**保留**：它是逐词时间戳的唯一来源（P1-7 实测证明无法合并进生产 worker），已由 e2e 锁定契约，不是死代码 |
 
 ---
 
@@ -173,7 +195,7 @@ syntax check + 全量测试 + coverage + build + 校验 dist 不含 `__test__`�
 ## 命令速查
 
 ```bash
-npm test        # 单元 + 集成 + 回归（173 项，零依赖）
+npm test        # 单元 + 集成 + 回归（181 项，零依赖）
 npm run test:e2e # E2E，需 EDGETTS_E2E=1
 npm run coverage # 覆盖率（当前 src/worker.js 98.5%）
 npm run check   # 语法检查 + 单测
