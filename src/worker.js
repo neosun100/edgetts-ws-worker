@@ -421,10 +421,15 @@ async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
 
   const schedule = (index) => {
     if (index >= chunks.length) return;
-    inFlight.set(
-      index,
-      getAudioChunk(chunks[index], ...ttsArgs).then((blob) => blob.arrayBuffer())
-    );
+    const task = getAudioChunk(chunks[index], ...ttsArgs).then((blob) => blob.arrayBuffer());
+    // 必须在这里就挂上 handler，不能等主循环结束后补。unhandledRejection 的判定是
+    // 时序性的：V8 在 microtask 队列排空的那一刻检查「此刻有没有 handler」，事后
+    // 补 .catch() 只会换来 PromiseRejectionHandledWarning，拦不住那次上报。
+    // 滑动窗口正好制造这个窗口期——窗口内靠后的分块可能在主循环仍阻塞于靠前的
+    // 分块时就已 reject（实测 concurrency=4、chunk0 慢 400ms 时必然触发）。在
+    // Workers 运行时里这会被记成 runtime exception，让已被正确处理的错误看着像事故。
+    task.catch(() => {});
+    inFlight.set(index, task);
   };
 
   try {
@@ -446,9 +451,8 @@ async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
     await writer.abort(error).catch(() => {});
     throw error;
   } finally {
-    // Swallow rejections from prefetches we abandoned, so they don't surface as
-    // unhandled promise rejections in the Workers runtime.
-    for (const pending of inFlight.values()) pending.catch(() => {});
+    // 被放弃的预取已在 schedule() 里挂过 handler，这里无需再兜一次；只清引用。
+    // aborted 时保留 Map 不清，是为了让仍在飞的请求保有引用直到自然结束。
     if (!aborted) inFlight.clear();
   }
 }

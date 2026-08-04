@@ -313,19 +313,22 @@ test('BUG#7 script-tag over-escaping: ui/index.html keeps real closing tags, no 
   assert.doesNotMatch(UI, /<\\\//, 'no backslash-escaped closing tags at all');
 });
 
-test('BUG#7b the served HTML closes its script tags correctly (source path)', async () => {
+// This used to be named "the served HTML closes its script tags correctly (source
+// path)" and wrapped every assertion in a try/catch where BOTH branches ended in a
+// pass. It always took the catch — UI_HTML is only injected at build time, so importing
+// from src/ can never serve HTML — meaning the three assertions in the try block never
+// ran even once, and one of them (`typeof html === 'string'`) could not fail anyway.
+// Renamed to the property it actually establishes; the escaping regression itself is
+// covered by BUG#7 (source text) and BUG#7c (built output).
+test('BUG#7b unbuilt src/worker.js fails loudly on UI_HTML instead of serving a broken page', async () => {
   __test__.resetTokenCache();
   const mock = installMockFetch();
   try {
-    const res = await worker.fetch(req('/'), ANON, {});
-    assert.equal(res.status, 200);
-    assert.match(res.headers.get('Content-Type'), /^text\/html/);
-    // src/worker.js has no UI_HTML bound (that happens at build time), so this
-    // path must fail loudly rather than serve a broken page.
-    const html = await res.text();
-    assert.ok(typeof html === 'string');
-  } catch (err) {
-    assert.match(String(err), /UI_HTML/, 'unbuilt source must fail on UI_HTML, not silently');
+    await assert.rejects(
+      () => worker.fetch(req('/'), ANON, {}),
+      /UI_HTML/,
+      'serving the UI without a build step must throw, not return half a page'
+    );
   } finally {
     mock.restore();
   }
@@ -480,6 +483,79 @@ test('BUG#9d an unknown alias-looking voice is a clear 400 invalid_voice', async
     assert.equal((await res.json()).error.code, 'invalid_voice');
     assert.equal(mock.calls.synth, 0);
   } finally {
+    mock.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// BUG 10: the sliding-window prefetch attached its rejection handler too late.
+// `schedule()` stored a bare promise and the `finally` block only ran
+// `pending.catch(...)` AFTER the main loop had exited — but a chunk queued later
+// in the window can reject while the loop is still awaiting an earlier, slower
+// chunk. unhandledRejection is decided at that moment, not retroactively, so the
+// Workers runtime logged a runtime exception for an error the code handles
+// correctly. Reproduced with chunk 0 delayed and a later chunk failing.
+// Fix: attach .catch() inside schedule(), at creation time.
+// ---------------------------------------------------------------------------
+test('BUG#10 a mid-window chunk failure must not raise unhandledRejection', async () => {
+  __test__.resetTokenCache();
+
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(String(reason?.message ?? reason));
+  process.on('unhandledRejection', onUnhandled);
+
+  // Chunk 0 is slow, chunk 2 fails fast: while the writer is blocked on 0, the
+  // rejection of 2 sits in the map with no handler in the buggy version.
+  //
+  // The failure status matters. A 500 is retried (150ms + 300ms backoff), so it
+  // would only reject at ~450ms — after the main loop had already reached chunk 2
+  // and attached a handler, hiding the bug. 400 is a caller error that
+  // getAudioChunk refuses to retry, so it rejects on the first attempt, while the
+  // loop is still awaiting chunk 0. That ordering is the whole point of the test.
+  const mock = installMockFetch({
+    synth: async ({ index }) => {
+      if (index === 0) await new Promise((r) => setTimeout(r, 300));
+      if (index === 2) return { status: 400, body: 'upstream rejected the ssml' };
+      return { status: 200, body: Buffer.alloc(64) };
+    },
+  });
+
+  try {
+    // Six chunks with concurrency 4, so indices 0-3 are in flight together.
+    // chunk_size must be >= LIMITS.MIN_CHUNK_SIZE (50) or it is clamped up and the
+    // sentences merge — an earlier version of this test asked for 24, got 50, and
+    // produced only 2 chunks, so the failing index was never even requested.
+    const sentence = 'This sentence is deliberately long enough to fill a chunk.';
+    const res = await worker.fetch(
+      speechRequest({
+        input: Array.from({ length: 6 }, () => sentence).join(' '),
+        voice: 'en-US-AvaNeural',
+        stream: true,
+        concurrency: 4,
+        chunk_size: 50,
+      }),
+      ANON,
+      {}
+    );
+
+    // The stream is expected to break — that is the correct, already-tested behavior.
+    try {
+      await res.arrayBuffer();
+    } catch {
+      /* broken stream is the intended signal to the client */
+    }
+
+    // Let every abandoned prefetch settle and the microtask queue drain, which is
+    // when V8 decides whether a rejection was unhandled.
+    await new Promise((r) => setTimeout(r, 500));
+
+    assert.deepEqual(
+      unhandled,
+      [],
+      'abandoned prefetches must carry a handler from the moment they are created'
+    );
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
     mock.restore();
   }
 });
