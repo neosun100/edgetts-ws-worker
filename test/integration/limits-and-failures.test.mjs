@@ -368,3 +368,123 @@ test('MAX_CHUNKS leaves headroom under the Cloudflare subrequest ceiling', async
   assert.ok(MAX_CHUNKS < 50, 'must stay below the platform limit of 50');
   assert.ok(50 - MAX_CHUNKS >= 3, 'leaves room for token/voice-list requests');
 });
+
+test('a request that cannot possibly fit is refused without paying to chunk it', async () => {
+  // ceil(chars / chunk_size) is a LOWER bound on the chunk count, because smartChunkText
+  // never emits a chunk longer than chunk_size. When that bound already exceeds MAX_CHUNKS
+  // the conclusion is certain, so there is no reason to walk all 50000 characters first.
+  //
+  // Why it matters: chunking 50000 characters at chunk_size=50 produces 1011 chunks and
+  // measured 4.8ms on its own, with the whole request at 39.2ms end to end — four times
+  // the Workers 10ms CPU budget spent on a request that was always going to be rejected.
+  // That is a free CPU-drain path. Warm median after the fix: 0.65ms.
+  await withMock({}, async (mock) => {
+    const input = 'ab。'.repeat(16666); // ~50000 chars
+    const res = await worker.fetch(
+      speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: 50 }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 413);
+    const json = await res.json();
+    assert.equal(json.error.code, 'too_many_chunks');
+    // The message reports the bound, and says so — the real count would cost the work
+    // this short circuit exists to avoid.
+    assert.match(json.error.message, /至少/, 'reports a lower bound, not a fabricated exact count');
+    assert.match(json.error.message, /1000/, 'states the bound it computed');
+    assert.equal(mock.calls.synth, 0);
+  });
+});
+
+test('the lower-bound short circuit never rejects a request that would have fit', async () => {
+  // A lower bound can only under-count, so it must not reject anything the real chunker
+  // would have accepted. Check both sides of the boundary against the real chunker.
+  const MAX = __test__.LIMITS.MAX_CHUNKS;
+  for (const chars of [900, 13002, 13500]) {
+    await withMock({}, async (mock) => {
+      const input = 'ab。'.repeat(Math.ceil(chars / 3));
+      const realChunks = __test__.smartChunkText(input, 300).length;
+      const res = await worker.fetch(
+        speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: 300 }),
+        ANON,
+        {}
+      );
+      if (realChunks <= MAX) {
+        assert.equal(res.status, 200, `${input.length} chars -> ${realChunks} chunks should pass`);
+        assert.equal(mock.calls.synth, realChunks, 'one upstream call per chunk');
+      } else {
+        assert.equal(res.status, 413, `${input.length} chars -> ${realChunks} chunks should fail`);
+      }
+    });
+  }
+});
+
+test('the bound is a bound: it is never above the real chunk count', async () => {
+  // The short circuit is only sound if ceil(len / size) <= actual chunks. Verify the
+  // invariant directly across shapes rather than trusting the arithmetic.
+  const shapes = [
+    'ab。'.repeat(300),
+    'a'.repeat(900),
+    '第一句。第二句？第三句！'.repeat(50),
+    ('x'.repeat(299) + '。').repeat(20),
+    'a,'.repeat(450),
+  ];
+  for (const input of shapes) {
+    for (const size of [50, 300, 2000]) {
+      const bound = Math.ceil(input.length / size);
+      const actual = __test__.smartChunkText(input, size).length;
+      assert.ok(
+        bound <= actual,
+        `bound ${bound} exceeded actual ${actual} for ${input.length} chars @ ${size} — ` +
+          'the short circuit would reject a valid request'
+      );
+    }
+  }
+});
+
+test('the slow path still rejects when the bound passes but real chunking exceeds the limit', async () => {
+  // The lower bound is not tight. Segments slightly longer than chunk_size/2 pack one per
+  // chunk (two would overflow), so the real count can be nearly double the bound: 6946
+  // characters at chunk_size=300 gives a bound of 24 but 46 actual chunks. The short
+  // circuit lets this through, and the post-chunking check has to catch it — otherwise the
+  // request goes upstream with 46 subrequests and hits the platform ceiling mid-flight,
+  // which for a streaming request means a silently truncated 200.
+  await withMock({}, async (mock) => {
+    const segment = 'x'.repeat(150) + '。'; // 151 chars: two never fit in a 300 chunk
+    const input = segment.repeat(46);
+    const bound = Math.ceil(input.length / 300);
+    const actual = __test__.smartChunkText(input, 300).length;
+    assert.ok(bound <= __test__.LIMITS.MAX_CHUNKS, 'premise: the bound does NOT trip');
+    assert.ok(actual > __test__.LIMITS.MAX_CHUNKS, 'premise: the real count DOES exceed');
+
+    const res = await worker.fetch(
+      speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: 300 }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 413, 'must be refused by the post-chunking check');
+    const json = await res.json();
+    assert.equal(json.error.code, 'too_many_chunks');
+    // This path knows the exact count, so it must report it rather than a bound.
+    assert.match(json.error.message, new RegExp(String(actual)), 'reports the exact count');
+    assert.doesNotMatch(json.error.message, /至少/, 'no "at least" when the count is known');
+    assert.equal(mock.calls.synth, 0, 'nothing reached upstream');
+  });
+});
+
+test('a request just inside the limit on the slow path still succeeds', async () => {
+  // The mirror case, so the slow-path check cannot be made overly strict.
+  await withMock({}, async (mock) => {
+    const segment = 'x'.repeat(150) + '。';
+    const input = segment.repeat(40); // 40 chunks, under MAX_CHUNKS
+    const actual = __test__.smartChunkText(input, 300).length;
+    assert.ok(actual <= __test__.LIMITS.MAX_CHUNKS, 'premise: fits');
+    const res = await worker.fetch(
+      speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: 300 }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 200);
+    assert.equal(mock.calls.synth, actual, 'one upstream call per chunk');
+  });
+});
