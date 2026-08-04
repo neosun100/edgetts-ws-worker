@@ -61,11 +61,16 @@ const VOICES = [
  *  - pcmSeconds: duration of audio the stubbed /v1/audio/speech returns
  *  - chunkMs: how much audio per streamed chunk (exercises incremental playback)
  *  - chunkDelayMs: delay between chunks, to simulate a slow upstream
- *  - failSpeech: when set, /v1/audio/speech answers with this status and a JSON error
- *    body instead of audio — for asserting that the UI cleans up after a failure
+ *  - failSpeech: when set, /v1/audio/speech answers with this status instead of audio —
+ *    for asserting that the UI cleans up after a failure
+ *  - failSpeechPlainText: with failSpeech, answer with a text/plain body (like the bare
+ *    503 Cloudflare itself returns) instead of the JSON error shape
  */
 export async function startUiServer(opts = {}) {
-  const { pcmSeconds = 3, chunkMs = 200, chunkDelayMs = 15, failSpeech = 0 } = opts;
+  const {
+    pcmSeconds = 3, chunkMs = 200, chunkDelayMs = 15,
+    failSpeech = 0, failSpeechPlainText = false,
+  } = opts;
   const html = await extractUiHtml();
   const stats = { speechRequests: 0, lastBody: null, bytesSent: 0 };
 
@@ -85,11 +90,18 @@ export async function startUiServer(opts = {}) {
       try { stats.lastBody = JSON.parse(Buffer.concat(chunks).toString()); } catch { stats.lastBody = null; }
 
       if (failSpeech) {
+        // text/plain mirrors what Cloudflare returns when it kills the request itself
+        // ("error code: 1102"); the UI must not try to JSON.parse that.
+        const plain = failSpeechPlainText;
         res.writeHead(failSpeech, {
-          'Content-Type': 'application/json',
+          'Content-Type': plain ? 'text/plain' : 'application/json',
           'Access-Control-Allow-Origin': '*',
         });
-        res.end(JSON.stringify({ error: { message: 'stub failure', code: 'tts_generation_error' } }));
+        res.end(
+          plain
+            ? 'error code: 1102'
+            : JSON.stringify({ error: { message: 'stub failure', code: 'tts_generation_error' } })
+        );
         return;
       }
 
@@ -136,7 +148,14 @@ export async function startUiServer(opts = {}) {
   return {
     url: `http://127.0.0.1:${port}`,
     stats,
-    async close() { await new Promise((r) => server.close(r)); },
+    async close() {
+      // server.close() only stops accepting NEW connections; it then waits for existing
+      // ones to end. Chrome holds keep-alive sockets open, so closing a per-test server
+      // blocked for 6+ seconds (measured) and one e2e test took 58s. closeAllConnections
+      // drops them, which is what we want: the test is finished with this server.
+      server.closeAllConnections?.();
+      await new Promise((r) => server.close(r));
+    },
   };
 }
 

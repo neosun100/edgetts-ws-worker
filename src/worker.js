@@ -378,16 +378,23 @@ function toModel(voice) {
 async function getModels() {
   const fresh = voicesCache.models && Date.now() - voicesCache.fetchedAt < VOICES_TTL_MS;
   if (fresh) return voicesCache.models;
-  // 合并并发请求：冷启动时多个请求同时进来不应各打一次上游
-  if (voicesInFlight) return voicesInFlight;
-  voicesInFlight = (async () => {
-    const response = await fetch(VOICES_URL);
-    if (!response.ok) throw new Error("Failed to fetch voices from EdgeTTS");
-    const voices = await response.json();
-    const models = voices.map(toModel);
-    voicesCache = { models, fetchedAt: Date.now() };
-    return models;
-  })().finally(() => { voicesInFlight = null; });
+
+  // 合并并发请求：冷启动时多个请求同时进来不应各打一次上游。
+  if (!voicesInFlight) {
+    voicesInFlight = (async () => {
+      const response = await fetch(VOICES_URL);
+      if (!response.ok) throw new Error("Failed to fetch voices from EdgeTTS");
+      const voices = await response.json();
+      const models = voices.map(toModel);
+      voicesCache = { models, fetchedAt: Date.now() };
+      return models;
+    })().finally(() => { voicesInFlight = null; });
+  }
+
+  // 关键：降级逻辑必须包住**所有**调用方，而不只是发起那一次刷新的那个。
+  // 原先跟随者在上面直接 `return voicesInFlight`，于是拒绝发生在这段 catch 之外，
+  // 它们完全跳过了过期缓存回退。实测上游挂掉时 5 个并发请求里只有 1 个拿到完整的
+  // 322 条，另外 4 个拿到 2 条兜底列表——UI 的音色选择器会随机只显示 2 个音色。
   try {
     return await voicesInFlight;
   } catch (error) {

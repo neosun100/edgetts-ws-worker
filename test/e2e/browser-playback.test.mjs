@@ -335,3 +335,63 @@ test('the download filename extension matches the actual audio format', { skip: 
     'a streamed download is pcmToWav output, so it must be .wav, got ' + out.streaming
   );
 });
+
+test('a plain-text error body surfaces the real cause, not a JSON parse error', { skip: SKIP }, async () => {
+  // Cloudflare's own failures (resource limits) come back as text/plain "error code: 1102",
+  // not the Worker's JSON error shape. The UI called response.json() unconditionally, so
+  // the user saw "Unexpected token e in JSON..." and the actual reason was hidden.
+  const failing = await startUiServer({ failSpeech: 503, failSpeechPlainText: true });
+  const page = chrome.page;
+  try {
+    await page.goto(failing.url);
+    for (const stream of [false, true]) {
+      const message = await page.evaluate(`(async () => {
+        const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+        vm.config.baseUrl = ${JSON.stringify(failing.url)};
+        vm.config.apiKey = 'test-key';
+        vm.form.inputText = 'hello';
+        await vm.generateSpeech(${stream});
+        return vm.status && vm.status.message;
+      })()`);
+      assert.ok(message, 'stream=' + stream + ': an error was reported');
+      assert.match(
+        message,
+        /1102/,
+        'stream=' + stream + ': the upstream text must reach the user, got ' + message
+      );
+      assert.doesNotMatch(
+        message,
+        /JSON|Unexpected token/i,
+        'stream=' + stream + ': a parse error must not replace the real cause, got ' + message
+      );
+      assert.match(message, /503/, 'stream=' + stream + ': the status code is kept too');
+    }
+  } finally {
+    await failing.close();
+    await page.goto(server.url);
+    await configureApp();
+  }
+});
+
+test('a JSON error body still yields the server message', { skip: SKIP }, async () => {
+  // The tolerant path must not lose the good case: when the Worker does return its JSON
+  // error shape, the human-readable message is what the user should see.
+  const failing = await startUiServer({ failSpeech: 500 });
+  const page = chrome.page;
+  try {
+    await page.goto(failing.url);
+    const message = await page.evaluate(`(async () => {
+      const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+      vm.config.baseUrl = ${JSON.stringify(failing.url)};
+      vm.config.apiKey = 'test-key';
+      vm.form.inputText = 'hello';
+      await vm.generateSpeech(false);
+      return vm.status && vm.status.message;
+    })()`);
+    assert.match(message, /stub failure/, 'the JSON error.message is used, got ' + message);
+  } finally {
+    await failing.close();
+    await page.goto(server.url);
+    await configureApp();
+  }
+});

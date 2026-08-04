@@ -262,3 +262,81 @@ test('voiceDisplayName degrades safely when upstream changes shape', () => {
   // Nothing usable at all: an empty label, never the string "undefined".
   assert.equal(f({}), '');
 });
+
+// ------------------------------------------------- degradation under concurrency
+// The stale-cache fallback only protected the request that happened to trigger the
+// refresh. Followers took an early `return voicesInFlight`, so the rejection surfaced
+// outside the try/catch that implements the fallback and they skipped it entirely.
+// Measured: with the cache expired and upstream down, 1 of 5 concurrent requests got the
+// full 322-voice list and the other 4 got the 2-voice emergency list — the built-in
+// voice picker would randomly show 2 voices.
+
+test('every concurrent request gets the stale cache when upstream is down', async () => {
+  await withMock({}, async (mock) => {
+    // Warm the cache, then expire it so the next call attempts a refresh.
+    const warm = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    assert.equal(warm.length, 322);
+    __test__.expireVoicesCache();
+
+    // Count here rather than via mock.calls.voices: these requests are answered by the
+    // interceptor and never reach the mock, so the mock's counter would stay at 1.
+    let attempts = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/voices/list')) {
+        attempts++;
+        return new Response('down', { status: 502 });
+      }
+      return realFetch(input, init);
+    };
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, () => worker.fetch(req('/v1/models'), ANON, {}))
+      );
+      const lengths = await Promise.all(
+        responses.map(async (r) => (await r.json()).length)
+      );
+      assert.deepEqual(
+        lengths,
+        [322, 322, 322, 322, 322],
+        'all callers must see the same stale list, not a mix of 322 and the fallback'
+      );
+      // Coalescing must survive the fix: one upstream attempt for the whole burst.
+      assert.equal(attempts, 1, '5 concurrent requests share a single upstream attempt');
+      assert.ok(
+        mock.logs.some((l) => l.msg.includes('返回过期缓存')),
+        'the degradation is logged'
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+test('with no cache at all, concurrent requests all degrade the same way', async () => {
+  // The mirror case: nothing cached, upstream down. /v1/models has a built-in fallback
+  // list; the important part is that every caller gets the SAME answer.
+  await withMock({}, async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.includes('/voices/list')) return new Response('down', { status: 502 });
+      return realFetch(input, init);
+    };
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 4 }, () => worker.fetch(req('/v1/models'), ANON, {}))
+      );
+      const results = await Promise.all(
+        responses.map(async (r) => ({ status: r.status, n: (await r.json()).length }))
+      );
+      const first = JSON.stringify(results[0]);
+      for (const r of results) {
+        assert.equal(JSON.stringify(r), first, 'concurrent callers must not diverge');
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

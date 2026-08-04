@@ -1361,6 +1361,24 @@
             this[key] = '';
           }
         },
+        // 从失败响应里取出可读的错误说明。不能直接 await response.json()：
+        // Cloudflare 自己产生的错误(如超出资源限制的 503)是 text/plain 的
+        // "error code: 1102"，对它调 json() 会抛 SyntaxError，于是用户看到的是
+        // "Unexpected token e in JSON" —— 真正的原因被完全掩盖。
+        async errorMessageFrom(response) {
+          const fallback = "HTTP " + response.status +
+            (response.statusText ? " " + response.statusText : "");
+          let raw = "";
+          try { raw = await response.text(); } catch (e) { return fallback; }
+          if (!raw) return fallback;
+          try {
+            const data = JSON.parse(raw);
+            if (data && data.error && data.error.message) return data.error.message;
+          } catch (e) { /* 不是 JSON，按纯文本处理 */ }
+          // 纯文本错误体(CF 的 "error code: 1102" 之类)照原样带上，并保留状态码，
+          // 因为纯文本里通常没有状态信息。
+          return fallback + ": " + raw.trim().slice(0, 200);
+        },
         formatMimeType(fmt) {
           return {
             mp3: 'audio/mpeg', pcm: 'audio/pcm', opus: 'audio/webm', wav: 'audio/wav',
@@ -1454,11 +1472,7 @@
           });
 
           if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(
-              errorData.error?.message ||
-              'HTTP error! status: ' + response.status
-            );
+            throw new Error(await this.errorMessageFrom(response));
           }
 
           const blob = await response.blob();
@@ -1509,8 +1523,7 @@
 
             if (!response.ok) {
               running = false;
-              const errorData = await response.json();
-              throw new Error(errorData.error?.message || 'HTTP ' + response.status);
+              throw new Error(await self.errorMessageFrom(response));
             }
 
             self.updateStatus('接收数据中...', 'info');
@@ -1653,8 +1666,7 @@
             
             if (!response.ok) {
               running = false;
-              const errorData = await response.json();
-              throw new Error(errorData.error?.message || 'HTTP ' + response.status);
+              throw new Error(await self.errorMessageFrom(response));
             }
             
             self.updateStatus('🎵 PCM流式播放中...', 'success');
