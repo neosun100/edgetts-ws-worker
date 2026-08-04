@@ -24,7 +24,9 @@ if (!worker.includes('UI_HTML')) {
 // reaches the browser malformed (the inline script then fails to parse and Vue never
 // mounts — the page shows raw {{ mustaches }}). Forbid them in the inline script and
 // fail loudly, pointing at the offending line. Use string concatenation instead.
-for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+// Case-insensitive: HTML tag names are, so `<SCRIPT>` would have slipped past a
+// lowercase-only pattern and defeated the guard entirely.
+for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)) {
   const body = m[1];
   const idx = body.search(/`|\$\{/);
   if (idx !== -1) {

@@ -180,7 +180,7 @@ syntax check + 全量测试 + coverage + build + 校验 dist 不含 `__test__`�
 | 前端拆分 | `ui/index.html` 仍是 1200+ 行单文件（含 322 语音的语言映射表）。可抽出数据表 |
 | ~~语音列表缓存~~ ✅ | 已完成：进程内 6 小时缓存 + `Cache-Control: max-age=21600`；并发合并；上游故障时返回过期缓存(留 warn 痕迹)，冷启动失败才降级到内置列表(`no-store`) |
 | `cleanText` 的容错来源注释 | 多处正则清理未说明脏数据来源，半年后无人知道是否还需要 |
-| ~~前端 e2e~~ ✅ | 已完成：用**裸 CDP**(本机 Chrome + Node 内置 WebSocket)驱动真实浏览器，**零依赖**、不引入 Playwright。5 项测试含「流式必须调度完整时长」(instrument `AudioBufferSourceNode.start` 累加实际调度秒数)、流式强制 PCM、声纹随音频变色、暗色主题。无 Chrome 时自动 skip。**首次运行即抓到一个真实 bug**(见 CHANGELOG 2.8.0) |
+| ~~前端 e2e~~ ✅ | 已完成：用**裸 CDP**(本机 Chrome + Node 内置 WebSocket)驱动真实浏览器，**零依赖**、不引入 Playwright。8 项测试含「流式必须调度完整时长」(instrument `AudioBufferSourceNode.start` 累加实际调度秒数)、流式强制 PCM、声纹随音频变色、暗色主题。无 Chrome 时自动 skip。**首次运行即抓到一个真实 bug**(见 CHANGELOG 2.8.0) |
 | ~~`legacy/` 的去留~~ ✅ | 已裁定**保留**：它是逐词时间戳的唯一来源（P1-7 实测证明无法合并进生产 worker），已由 e2e 锁定契约，不是死代码 |
 
 ---
@@ -195,9 +195,9 @@ syntax check + 全量测试 + coverage + build + 校验 dist 不含 `__test__`�
 ## 命令速查
 
 ```bash
-npm test        # 单元 + 集成 + 回归（189 项，零依赖）
+npm test        # 单元 + 集成 + 回归（226 项，零依赖）
 npm run test:e2e # E2E，需 EDGETTS_E2E=1
-npm run coverage # 覆盖率（当前 src/worker.js 98.5%）
+npm run coverage # 覆盖率（当前 src/worker.js 行 99.2% / 分支 98.0%）
 npm run check   # 语法检查 + 单测
 npm run build   # ui/ + src/ → dist/worker.js
 npm run deploy  # 构建并部署（需 wrangler + API_KEY secret 已绑定）

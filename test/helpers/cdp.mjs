@@ -10,12 +10,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const CHROME_CANDIDATES = [
+  // CHROME_PATH goes FIRST so it actually overrides, as CONTRIBUTING promises. It used to
+  // sit last, which meant that on any machine with Chrome installed at a standard location
+  // the variable was silently ignored — the opposite of an override.
+  process.env.CHROME_PATH,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
-  process.env.CHROME_PATH,
 ].filter(Boolean);
 
 async function findChrome() {

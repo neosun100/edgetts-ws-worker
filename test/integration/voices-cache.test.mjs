@@ -132,3 +132,64 @@ test('TTL is a sane duration and matches the advertised max-age', async () => {
     'header max-age matches the in-process TTL'
   );
 });
+
+// --------------------------------------------------------- query-param filtering
+// README documented ?neural and ?multilingual on both model endpoints, but the filter
+// only existed on /v1/models — /v1/models/public silently ignored the parameters, and
+// that is the endpoint the built-in voice picker uses. Filtering now lives in one shared
+// helper so the two endpoints cannot drift apart again.
+
+const bothEndpoints = ['/v1/models', '/v1/models/public'];
+
+test('?multilingual=true filters on BOTH model endpoints', async () => {
+  await withMock({}, async () => {
+    for (const path of bothEndpoints) {
+      const all = await (await worker.fetch(req(path), ANON, {})).json();
+      const filtered = await (await worker.fetch(req(path + '?multilingual=true'), ANON, {})).json();
+      assert.ok(all.length > filtered.length, path + ': the filter must actually remove voices');
+      assert.ok(filtered.length > 0, path + ': multilingual voices exist');
+      assert.ok(
+        filtered.every((m) => m.id.includes('Multilingual')),
+        path + ': every returned voice is multilingual'
+      );
+    }
+  });
+});
+
+test('the two endpoints return identical results for the same filter', async () => {
+  await withMock({}, async () => {
+    const [a, b] = await Promise.all(
+      bothEndpoints.map(async (p) =>
+        (await (await worker.fetch(req(p + '?multilingual=true'), ANON, {})).json()).map((m) => m.id)
+      )
+    );
+    assert.deepEqual(a, b, 'public and authenticated listings must not drift apart');
+  });
+});
+
+test('only true/1 enable a filter; anything else is ignored', async () => {
+  await withMock({}, async () => {
+    const count = async (q) =>
+      (await (await worker.fetch(req('/v1/models/public' + q), ANON, {})).json()).length;
+    const total = await count('');
+    assert.equal(await count('?multilingual=1'), await count('?multilingual=true'), '1 == true');
+    assert.equal(await count('?multilingual=false'), total, 'false does not filter');
+    assert.equal(await count('?multilingual=yes'), total, 'an unrecognised value does not filter');
+    assert.equal(await count('?multilingual='), total, 'an empty value does not filter');
+  });
+});
+
+test('?neural is a documented no-op: every upstream voice is Neural', async () => {
+  // Kept for backward compatibility with existing callers rather than removed, but it
+  // cannot filter anything. Pinning this stops someone "fixing" the docs the wrong way.
+  await withMock({}, async () => {
+    const all = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    const neural = await (await worker.fetch(req('/v1/models?neural=true'), ANON, {})).json();
+    assert.equal(neural.length, all.length, '?neural cannot narrow the list');
+    assert.equal(
+      all.filter((m) => !m.id.includes('Neural')).length,
+      0,
+      'the premise: no non-Neural voice exists upstream'
+    );
+  });
+});
