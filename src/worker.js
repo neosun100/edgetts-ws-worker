@@ -224,6 +224,19 @@ async function handleSpeechRequest(request) {
     // 自定义关键词
     ...cleaning_options
   };
+  // custom_keywords 会被 .split(",") —— 传数字/数组/对象时那个方法不存在，异常冒到最外层
+  // 的 catch，调用方收到 500 internal_server_error。这是调用方的输入错误，必须是 400，
+  // 而且要说清收到的是什么类型，否则对方只能猜。
+  if (
+    finalCleaningOptions.custom_keywords !== undefined &&
+    typeof finalCleaningOptions.custom_keywords !== "string"
+  ) {
+    return errorResponse(
+      `cleaning_options.custom_keywords 必须是逗号分隔的字符串，收到 ${typeof finalCleaningOptions.custom_keywords}`,
+      400,
+      "invalid_cleaning_options"
+    );
+  }
   const cleanedInput = cleanText(input, finalCleaningOptions);
   if (!cleanedInput) {
     return errorResponse("文本清理后为空，请检查 cleaning_options", 400, "input_empty_after_cleaning");

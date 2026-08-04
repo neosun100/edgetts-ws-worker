@@ -542,3 +542,66 @@ test('GET /v1/audio/speech -> 405 method_not_allowed (validation is POST-only)',
     assert.equal(mock.calls.synth, 0);
   });
 });
+
+// cleaning_options.custom_keywords is split with String.prototype.split, so a non-string
+// threw TypeError, escaped to the outermost catch, and the caller got a 500
+// internal_server_error for what is plainly a bad request.
+test('a non-string custom_keywords is a 400, not a 500', async () => {
+  for (const bad of [123, ['a'], { a: 1 }, true]) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const res = await worker.fetch(
+        speechRequest({
+          input: 'hi',
+          voice: 'en-US-AvaNeural',
+          cleaning_options: { custom_keywords: bad },
+        }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 400, JSON.stringify(bad) + ' must be a caller error');
+      const json = await res.json();
+      assert.equal(json.error.code, 'invalid_cleaning_options');
+      // Name the offending type, so the caller does not have to guess.
+      assert.match(json.error.message, new RegExp(typeof bad));
+      assert.equal(mock.calls.synth, 0, 'rejected before reaching upstream');
+    } finally {
+      mock.restore();
+    }
+  }
+});
+
+test('a string custom_keywords still works, and omitting it is fine', async () => {
+  for (const value of ['广告,推广', '']) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const res = await worker.fetch(
+        speechRequest({
+          input: '这是广告内容',
+          voice: 'en-US-AvaNeural',
+          cleaning_options: { custom_keywords: value },
+        }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 200, JSON.stringify(value) + ' is valid');
+    } finally {
+      mock.restore();
+    }
+  }
+  // Omitted entirely.
+  __test__.resetTokenCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      speechRequest({ input: 'hi', voice: 'en-US-AvaNeural', cleaning_options: {} }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 200);
+  } finally {
+    mock.restore();
+  }
+});
