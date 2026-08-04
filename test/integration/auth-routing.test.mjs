@@ -21,9 +21,12 @@ after(() => {
   delete globalThis.UI_HTML;
 });
 
-// Every test runs under a fresh mock + empty token cache; `fn(mock)` gets the harness.
+// Every test runs under a fresh mock + empty token/voices caches; `fn(mock)` gets the
+// harness. Resetting the voice-list cache matters: without it, a test that already
+// populated it would silently satisfy the next test's "did it hit upstream?" assertion.
 async function withMock(opts, fn) {
   __test__.resetTokenCache();
+  __test__.resetVoicesCache();
   const mock = installMockFetch(opts);
   try {
     return await fn(mock);
@@ -306,7 +309,9 @@ test('GET /v1/models?neural / ?multilingual filter by id substring', async () =>
     // Anything other than "true"/"1" is not a filter.
     assert.deepEqual(await ids('/v1/models?neural=false'), voices.map((v) => v.ShortName));
     assert.deepEqual(await ids('/v1/models?neural='), voices.map((v) => v.ShortName));
-    assert.equal(mock.calls.voices, 7, 'one upstream voice-list fetch per request (no caching)');
+    // The voice list is cached in-process, so those 7 requests share ONE upstream
+    // fetch. Filtering happens on the cached list, per request.
+    assert.equal(mock.calls.voices, 1, '7 requests share a single cached upstream fetch');
 
     // description is "<LocalName> - <Gender>"
     const models = await (await worker.fetch(req('/v1/models'), env, {})).json();

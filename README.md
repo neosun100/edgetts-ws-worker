@@ -115,6 +115,10 @@ non-streaming requests you get a normal MP3/Opus/WAV file.
 Lists the available voices (322) in an OpenAI-models-like shape. Query filters:
 `?neural=true`, `?multilingual=true`.
 
+The list is cached in-process for 6 hours and served with
+`Cache-Control: public, max-age=21600`, so repeat calls don't hit upstream. If upstream
+is down the last known list is served (with a warning logged) rather than failing.
+
 ### `GET /`
 
 Serves the built-in web UI.

@@ -311,25 +311,66 @@ function clamp(value, min, max, fallback) {
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
+// 语音列表极少变动（连日核对均为 322 条），但此前每个请求都穿透到微软上游
+// （实测 52KB / 最高 483ms）。这里加两层缓存：
+//   1. 模块级内存缓存 —— 同一个 isolate 内的后续请求零上游调用
+//   2. 响应头 Cache-Control —— 让浏览器与 CF 边缘也能缓存，不必每次开页面重拉 322 条
+// 上游失败时若手上有过期缓存，宁可返回过期数据也不让调用方拿不到列表（留 warn 痕迹）。
+var VOICES_URL = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+var VOICES_TTL_MS = 6 * 60 * 60 * 1e3;      // 6 小时
+var MODELS_CACHE_SECONDS = 21600;           // 与 TTL 一致，供 Cache-Control 使用
+var voicesCache = { models: null, fetchedAt: 0 };
+var voicesInFlight = null;
+
+function toModel(voice) {
+  return {
+    id: voice.ShortName,
+    object: "model",
+    created: Date.now(),
+    owned_by: "microsoft",
+    language: voice.Locale,
+    gender: voice.Gender,
+    description: `${voice.LocalName} - ${voice.Gender}`
+  };
+}
+
+async function getModels() {
+  const fresh = voicesCache.models && Date.now() - voicesCache.fetchedAt < VOICES_TTL_MS;
+  if (fresh) return voicesCache.models;
+  // 合并并发请求：冷启动时多个请求同时进来不应各打一次上游
+  if (voicesInFlight) return voicesInFlight;
+  voicesInFlight = (async () => {
+    const response = await fetch(VOICES_URL);
+    if (!response.ok) throw new Error("Failed to fetch voices from EdgeTTS");
+    const voices = await response.json();
+    const models = voices.map(toModel);
+    voicesCache = { models, fetchedAt: Date.now() };
+    return models;
+  })().finally(() => { voicesInFlight = null; });
+  try {
+    return await voicesInFlight;
+  } catch (error) {
+    if (voicesCache.models) {
+      // 降级留痕：明确区分「拿到的是过期缓存」与「拿到的是新鲜数据」
+      console.warn("语音列表上游失败，返回过期缓存:", error.message);
+      return voicesCache.models;
+    }
+    throw error;
+  }
+}
+
+function modelsHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "Cache-Control": `public, max-age=${MODELS_CACHE_SECONDS}`,
+    ...makeCORSHeaders()
+  };
+}
+
 async function handlePublicModelsRequest() {
   try {
-    const response = await fetch("https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4");
-    if (!response.ok) {
-      throw new Error("Failed to fetch voices from EdgeTTS");
-    }
-    const voices = await response.json();
-    const models = voices.map((voice) => ({
-      id: voice.ShortName,
-      object: "model",
-      created: Date.now(),
-      owned_by: "microsoft",
-      language: voice.Locale,
-      gender: voice.Gender,
-      description: `${voice.LocalName} - ${voice.Gender}`
-    }));
-    return new Response(JSON.stringify(models), {
-      headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
-    });
+    const models = await getModels();
+    return new Response(JSON.stringify(models), { headers: modelsHeaders() });
   } catch (error) {
     console.error("获取语音列表失败:", error);
     return errorResponse("Failed to fetch voices", 500, "fetch_error");
@@ -337,20 +378,7 @@ async function handlePublicModelsRequest() {
 }
 async function handleModelsRequest(request) {
   try {
-    const response = await fetch("https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4");
-    if (!response.ok) {
-      throw new Error("Failed to fetch voices from EdgeTTS");
-    }
-    const voices = await response.json();
-    let models = voices.map((voice) => ({
-      id: voice.ShortName,
-      object: "model",
-      created: Date.now(),
-      owned_by: "microsoft",
-      language: voice.Locale,
-      gender: voice.Gender,
-      description: `${voice.LocalName} - ${voice.Gender}`
-    }));
+    let models = await getModels();
     const url = new URL(request.url);
     const filterNeural = url.searchParams.get("neural");
     const filterMultilingual = url.searchParams.get("multilingual");
@@ -360,17 +388,16 @@ async function handleModelsRequest(request) {
     if (filterMultilingual === "true" || filterMultilingual === "1") {
       models = models.filter((m) => m.id.includes("Multilingual"));
     }
-    return new Response(JSON.stringify(models), {
-      headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
-    });
+    return new Response(JSON.stringify(models), { headers: modelsHeaders() });
   } catch (error) {
     console.error("获取语音列表失败:", error);
     const fallbackModels = [
       { id: "zh-CN-XiaoxiaoNeural", object: "model", created: Date.now(), owned_by: "microsoft", language: "zh-CN", gender: "Female", description: "晓晓 - 温柔女声" },
       { id: "zh-CN-YunxiNeural", object: "model", created: Date.now(), owned_by: "microsoft", language: "zh-CN", gender: "Male", description: "云希 - 阳光男声" }
     ];
+    // 兜底列表不缓存：它是降级产物，不该被边缘/浏览器当成 6 小时有效的正常结果
     return new Response(JSON.stringify(fallbackModels), {
-      headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...makeCORSHeaders() }
     });
   }
 }
@@ -733,4 +760,18 @@ export const __test__ = {
     tokenInfo = { endpoint: null, token: null, expiredAt: null };
     tokenRefreshInFlight = null;
   },
+  // Same for the voice-list cache — without this a test that populated it would
+  // silently satisfy the next test's "does it hit upstream?" assertion.
+  resetVoicesCache() {
+    voicesCache = { models: null, fetchedAt: 0 };
+    voicesInFlight = null;
+  },
+  // Make the cache look expired while KEEPING the data, so tests can exercise the
+  // "upstream is down, serve stale" path (clearing it would take the fallback branch).
+  expireVoicesCache() {
+    voicesCache = { models: voicesCache.models, fetchedAt: 0 };
+    voicesInFlight = null;
+  },
+  VOICES_TTL_MS,
+  MODELS_CACHE_SECONDS,
 };

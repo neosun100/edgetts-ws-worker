@@ -105,6 +105,9 @@ Web UI 用 Web Audio API 在连续时间轴上播放流式 PCM，因此立即开
 
 以类 OpenAI-models 结构列出全部音色（322 个）。查询过滤：`?neural=true`、`?multilingual=true`。
 
+列表在进程内缓存 6 小时，并带 `Cache-Control: public, max-age=21600`，重复调用不再穿透上游。
+上游故障时返回最后一次成功的列表（并打 warn 日志），而不是直接失败。
+
 ### `GET /`
 
 返回内置 Web UI。
