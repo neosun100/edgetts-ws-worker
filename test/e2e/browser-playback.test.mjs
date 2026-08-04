@@ -220,17 +220,23 @@ test('object URLs are released between playbacks (no Blob leak)', { skip: SKIP }
 });
 
 test('dark theme applies and its surfaces are genuinely dark', { skip: SKIP }, async () => {
-  // Headless Chrome follows prefers-color-scheme and may already be dark, in which case
-  // "toggle until dark" would never fire and never write storage. Toggle to light first,
-  // then back to dark, so an actual toggle+persist round trip is exercised either way.
+  // The starting theme is NOT fixed: headless Chrome follows prefers-color-scheme, which
+  // is dark on this macOS setup and light on the GitHub Linux runner. An earlier version
+  // assumed it started dark, so on Linux the "toggle to light" branch never ran, nothing
+  // was persisted, and the assertion saw localStorage null. Drive to light explicitly
+  // (toggling only if needed), then to dark, so both transitions happen either way.
   const before = await chrome.page.evaluate(`(() => {
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;
     const read = () => document.documentElement.getAttribute('data-theme');
-    if (read() === 'dark') vm.toggleTheme();          // -> light
+    // Reach a known state, then make a real toggle from it.
+    if (read() !== 'dark') vm.toggleTheme();          // -> dark (whatever we started from)
+    const dark0 = read();
+    vm.toggleTheme();                                  // -> light, and persists
     const light = { theme: read(), stored: localStorage.getItem('tts_theme') };
-    vm.toggleTheme();                                  // -> dark
-    return { light, theme: read(), stored: localStorage.getItem('tts_theme') };
+    vm.toggleTheme();                                  // -> dark, and persists
+    return { dark0, light, theme: read(), stored: localStorage.getItem('tts_theme') };
   })()`);
+  assert.equal(before.dark0, 'dark', 'reached a known dark starting point');
   assert.equal(before.light.theme, 'light', 'toggled to light');
   assert.equal(before.light.stored, 'light', 'light persisted');
   assert.equal(before.theme, 'dark', 'toggled back to dark');
