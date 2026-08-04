@@ -1712,8 +1712,9 @@
           const ctx = this.ensureAudioContext();
           if (!this.analyser) {
             this.analyser = ctx.createAnalyser();
-            this.analyser.fftSize = 256;          // -> 128 频段，足够顺滑又不过密
-            this.analyser.smoothingTimeConstant = 0.8;
+            // 时域波形需要更多采样点才平滑；smoothing 调低让脉冲更"跳"、更跟得上音节
+            this.analyser.fftSize = 1024;
+            this.analyser.smoothingTimeConstant = 0.45;
             this.analyser.connect(ctx.destination);
           }
           return this.analyser;
@@ -1731,6 +1732,10 @@
           }
         },
 
+        // 脉冲声纹：不是原地抖动的频谱柱，而是「沿时间向左滚动」的脉冲条 +
+        // 叠在上面的实时时域波形。这两者结合才有语音备忘录 / 心电图那种动感：
+        //   - getByteTimeDomainData 给出以 128 为零线的真实声压曲线（每个音节都看得见）
+        //   - 每帧把当前音量峰值推入历史队列，整条历史向左平移 -> 脉冲随时间前进
         startViz() {
           this.vizActive = true;
           const analyser = this.analyser;
@@ -1738,13 +1743,16 @@
           const canvas = this.$refs.vizCanvas;
           if (!canvas) return;
           const ctx = canvas.getContext('2d');
-          const bins = analyser.frequencyBinCount;   // 128
-          const freq = new Uint8Array(bins);
+          const wave = new Uint8Array(analyser.fftSize);
           if (this.vizRAF) cancelAnimationFrame(this.vizRAF);
+
+          const SLOTS = 128;                // 历史脉冲条数量（越多越细密、越像声纹）
+          const hist = new Array(SLOTS).fill(0);
+          let hue = 190;                    // 色相缓慢漂移，避免死板的固定彩虹
+          let smoothed = 0;
 
           const draw = () => {
             this.vizRAF = requestAnimationFrame(draw);
-            // 处理 HiDPI 与容器尺寸
             const dpr = window.devicePixelRatio || 1;
             const cssW = canvas.clientWidth || 600;
             const cssH = canvas.clientHeight || 140;
@@ -1753,39 +1761,72 @@
               canvas.height = Math.round(cssH * dpr);
             }
             const W = canvas.width, H = canvas.height, mid = H / 2;
-            analyser.getByteFrequencyData(freq);
+
+            analyser.getByteTimeDomainData(wave);
+            // 本帧的峰值与 RMS：峰值决定脉冲高度，RMS 用于发光强度
+            let peak = 0, sumSq = 0;
+            for (let i = 0; i < wave.length; i++) {
+              const s = (wave[i] - 128) / 128;      // -1..1
+              const a = Math.abs(s);
+              if (a > peak) peak = a;
+              sumSq += s * s;
+            }
+            const rms = Math.sqrt(sumSq / wave.length);
+            // 快起慢落：起音瞬间跟得上，尾音有余韵 —— 这是"脉冲感"的关键
+            smoothed = peak > smoothed ? peak : smoothed * 0.82 + peak * 0.18;
+
+            hist.push(smoothed);
+            hist.shift();
+            hue = (hue + 0.6) % 360;
+
             ctx.clearRect(0, 0, W, H);
 
-            const bars = 64;                          // 只取低频一半，人声能量集中在此
-            const gap = 2 * dpr;
-            const bw = W / bars;
-            let energy = 0;
-            for (let i = 0; i < bars; i++) {
-              const v = freq[i] / 255;                // 0..1
-              energy += v;
-              const barH = Math.max(2 * dpr, v * mid * 0.95);
-              // 彩色迷彩：色相沿频段流动，振幅越大越亮越饱和
-              const hue = (i / bars) * 300 + 180;     // 青→蓝→紫→粉
-              const light = 45 + v * 35;
-              // 注意：整个 UI 被内嵌进 worker 的模板字符串，这里绝不能用反引号模板串
-              // （会被构建期转义后破坏内联脚本），一律用字符串拼接。
-              const grad = ctx.createLinearGradient(0, mid - barH, 0, mid + barH);
-              grad.addColorStop(0, 'hsla(' + hue + ',95%,' + light + '%,0.95)');
-              grad.addColorStop(0.5, 'hsla(' + (hue + 20) + ',90%,' + (light + 10) + '%,1)');
-              grad.addColorStop(1, 'hsla(' + hue + ',95%,' + light + '%,0.95)');
-              ctx.fillStyle = grad;
-              const x = i * bw + gap / 2;
-              const w = bw - gap;
-              const r = Math.min(w / 2, 6 * dpr);
-              // 上下镜像的圆角柱
+            // ---- 第一层：滚动脉冲条（越新越靠右、越亮）----
+            const slotW = W / SLOTS;
+            const barW = Math.max(2 * dpr, slotW * 0.55);
+            for (let i = 0; i < SLOTS; i++) {
+              const v = hist[i];
+              if (v <= 0.001) continue;
+              const age = i / SLOTS;                 // 0=最旧 1=最新
+              const barH = Math.max(2 * dpr, Math.pow(v, 0.75) * mid * 0.92);
+              const h = (hue + age * 90) % 360;      // 沿时间轴渐变色
+              const alpha = 0.25 + age * 0.75;       // 旧的淡、新的实
+              const light = 52 + v * 26;
+              const x = i * slotW + (slotW - barW) / 2;
+              ctx.fillStyle = 'hsla(' + h + ',95%,' + light + '%,' + alpha + ')';
               ctx.beginPath();
-              ctx.roundRect(x, mid - barH, w, barH * 2, r);
+              ctx.roundRect(x, mid - barH, barW, barH * 2, barW / 2);
               ctx.fill();
             }
-            // 中线微光
-            const avg = energy / bars;
-            ctx.fillStyle = 'hsla(190, 100%, 70%, ' + (0.15 + avg * 0.5) + ')';
-            ctx.fillRect(0, mid - dpr, W, 2 * dpr);
+
+            // ---- 第二层：实时时域波形（脉冲的"心跳线"）----
+            ctx.save();
+            ctx.lineWidth = 1.5 * dpr;
+            ctx.lineJoin = 'round';
+            ctx.shadowBlur = 10 * dpr;
+            ctx.shadowColor = 'hsla(' + ((hue + 40) % 360) + ',100%,70%,0.7)';
+            // 半透明:让脉冲条当主角,波形线只作为"心跳"叠层
+            ctx.strokeStyle = 'hsla(' + ((hue + 40) % 360) + ',100%,80%,0.55)';
+            ctx.beginPath();
+            // 每个横向像素取一个采样点，线条才顺滑（步长过大会画成折线）
+            const px = Math.max(1, Math.floor(wave.length / Math.max(1, W)));
+            let first = true;
+            for (let i = 0; i < wave.length; i += px) {
+              const x = (i / wave.length) * W;
+              const y = mid + ((wave[i] - 128) / 128) * mid * 0.8;
+              if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
+            }
+            ctx.stroke();
+            ctx.restore();
+
+            // ---- 第三层：中心脉冲光带，随音量呼吸 ----
+            const glowH = (2 + rms * 26) * dpr;
+            const glow = ctx.createLinearGradient(0, mid - glowH, 0, mid + glowH);
+            glow.addColorStop(0, 'hsla(' + hue + ',100%,70%,0)');
+            glow.addColorStop(0.5, 'hsla(' + hue + ',100%,78%,' + (0.35 + rms * 0.5) + ')');
+            glow.addColorStop(1, 'hsla(' + hue + ',100%,70%,0)');
+            ctx.fillStyle = glow;
+            ctx.fillRect(0, mid - glowH, W, glowH * 2);
           };
           draw();
         },

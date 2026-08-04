@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.3.1] - 2026-08-04
+
+### Changed
+- **Visualizer reworked from spectrum bars to a scrolling pulse.** The frequency-domain
+  bars animated in place (a "rainbow that shakes"); real players convey motion by moving
+  along the time axis. Now it combines a scrolling amplitude history (voice-memo style,
+  newest on the right, older bars fading) with a live time-domain waveform
+  (`getByteTimeDomainData`) and a breathing center glow. Attack is instant and release
+  decays, so each syllable reads as a distinct pulse. `fftSize` 256 → 1024 and
+  `smoothingTimeConstant` 0.8 → 0.45 for a snappier, higher-resolution response.
+
+![Pulse visualizer](docs/screenshots/pulse-visualizer.png)
+
 ## [2.3.0] - 2026-08-04
 
 ### Added
