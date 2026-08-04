@@ -35,11 +35,11 @@ jobs:
       - name: Verify build output is a valid module
         run: node --check dist/worker.js
 
-      - name: Unit + integration + regression tests
+      # `npm test` globs test/** so it already includes the browser e2e suite. A separate
+      # test:e2e step here would just run those tests a second time. The GitHub runner has
+      # Chrome, so they really execute (on the GitLab node:22-slim image they skip).
+      - name: All tests (unit + integration + regression + browser e2e)
         run: npm test
-
-      - name: Browser e2e (headless Chrome, no credentials needed)
-        run: npm run test:e2e
 
       - name: Coverage (informational)
         run: npm run coverage || true

@@ -29,8 +29,23 @@ async function findChrome() {
   return null;
 }
 
+/**
+ * True only when Chrome is present AND can actually be driven.
+ *
+ * Checking for the binary alone is not enough: on a CI runner the file exists but Chrome
+ * may refuse to start (root + setuid sandbox, missing shared libraries). That combination
+ * is the worst case — tests neither skip nor fail fast, they each wait out the launch
+ * timeout, and the job appears to hang. So prove it by launching once, cheaply.
+ */
 export async function chromeAvailable() {
-  return (await findChrome()) !== null;
+  if ((await findChrome()) === null) return false;
+  try {
+    const session = await launchChrome({ timeoutMs: 8000 });
+    await session.close();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -52,16 +67,27 @@ export async function launchChrome({ port = 0, timeoutMs = 15000 } = {}) {
     '--no-default-browser-check',
     '--disable-gpu',
     '--disable-dev-shm-usage',
+    // CI runners execute as root in a container, where Chrome's setuid sandbox refuses to
+    // start. Without this the browser never comes up, chromeAvailable() still reported
+    // true (the binary exists), and every test burned the full 15s launch timeout instead
+    // of skipping — the GitHub job hung for minutes. Harmless locally.
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
     // Critical for audio tests: otherwise AudioContext never leaves "suspended".
     '--autoplay-policy=no-user-gesture-required',
     '--mute-audio',
     'about:blank',
   ], { stdio: 'ignore' });
 
+  // If Chrome dies immediately (bad flags, missing shared libs, sandbox refusal), stop
+  // polling right away instead of waiting out the full timeout for every single test.
+  let exited = false;
+  proc.once('exit', () => { exited = true; });
+
   // Poll /json/version until the debugger is up.
   const deadline = Date.now() + timeoutMs;
   let wsUrl = null;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !exited) {
     try {
       const res = await fetch(`http://127.0.0.1:${chosenPort}/json/version`);
       if (res.ok) { wsUrl = (await res.json()).webSocketDebuggerUrl; break; }
