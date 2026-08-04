@@ -164,7 +164,7 @@
     .viz-canvas {
       display: block;
       width: 100%;
-      height: 140px;
+      height: 200px;   /* 环形律动需要接近方形的空间，比纯横条更高 */
     }
 
     /* ---------- 音色选择器 ---------- */
@@ -1732,10 +1732,11 @@
           }
         },
 
-        // 脉冲声纹：不是原地抖动的频谱柱，而是「沿时间向左滚动」的脉冲条 +
-        // 叠在上面的实时时域波形。这两者结合才有语音备忘录 / 心电图那种动感：
-        //   - getByteTimeDomainData 给出以 128 为零线的真实声压曲线（每个音节都看得见）
-        //   - 每帧把当前音量峰值推入历史队列，整条历史向左平移 -> 脉冲随时间前进
+        // 三区叠加的声纹：
+        //   左侧 —— Siri 风格环形律动：极坐标频谱环，多层闭合曲线反向缓转，中心呼吸光晕
+        //   右侧 —— 滚动脉冲：每帧峰值推入历史并左移，每个音节是一道沿时间前进的脉冲
+        //   叠加 —— 粒子迸发：检测起音(onset)时从环缘按能量溅出光点，带速度/阻尼/寿命
+        // 数据来源同时用时域(真实声压曲线、峰值/RMS)与频域(环的每个角度的半径)。
         startViz() {
           this.vizActive = true;
           const analyser = this.analyser;
@@ -1744,91 +1745,246 @@
           if (!canvas) return;
           const ctx = canvas.getContext('2d');
           const wave = new Uint8Array(analyser.fftSize);
+          const freq = new Uint8Array(analyser.frequencyBinCount);
           if (this.vizRAF) cancelAnimationFrame(this.vizRAF);
 
-          const SLOTS = 128;                // 历史脉冲条数量（越多越细密、越像声纹）
+          const SLOTS = 110;                // 滚动脉冲条数量
           const hist = new Array(SLOTS).fill(0);
-          let hue = 190;                    // 色相缓慢漂移，避免死板的固定彩虹
+          const parts = [];                 // 粒子池
+          const MAX_PARTS = 260;
+          const RING_PTS = 72;              // 环的采样点数
+          // 每层环各自保留上一帧的半径，用于时间维度平滑（避免逐帧跳动）
+          const ringSmooth = [
+            new Array(RING_PTS).fill(0),
+            new Array(RING_PTS).fill(0),
+            new Array(RING_PTS).fill(0),
+          ];
+          let hue = 190;                    // 色相在冷色区间内缓慢漂移
+          let huePhase = 0;
           let smoothed = 0;
+          let prevRms = 0;                  // 上一帧 RMS，用于 onset 检测
+          let ringPhase = 0;
+          let lastT = 0;
 
-          const draw = () => {
+          const draw = (now) => {
             this.vizRAF = requestAnimationFrame(draw);
+            // 用真实帧间隔驱动粒子物理，掉帧时运动也不会突变
+            const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 0.016;
+            lastT = now;
+
             const dpr = window.devicePixelRatio || 1;
             const cssW = canvas.clientWidth || 600;
-            const cssH = canvas.clientHeight || 140;
+            const cssH = canvas.clientHeight || 200;
             if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
               canvas.width = Math.round(cssW * dpr);
               canvas.height = Math.round(cssH * dpr);
             }
             const W = canvas.width, H = canvas.height, mid = H / 2;
 
+            // 亮色主题下要压低亮度、提高饱和，否则霓虹色在白底上会糊成一片看不见
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            const LB = isDark ? 0 : -22;      // 亮度偏移
+            const GLOW = isDark ? 1 : 0.55;   // 辉光强度系数
+
             analyser.getByteTimeDomainData(wave);
-            // 本帧的峰值与 RMS：峰值决定脉冲高度，RMS 用于发光强度
+            analyser.getByteFrequencyData(freq);
+
             let peak = 0, sumSq = 0;
             for (let i = 0; i < wave.length; i++) {
-              const s = (wave[i] - 128) / 128;      // -1..1
-              const a = Math.abs(s);
+              const s = (wave[i] - 128) / 128;
+              const a = s < 0 ? -s : s;
               if (a > peak) peak = a;
               sumSq += s * s;
             }
             const rms = Math.sqrt(sumSq / wave.length);
-            // 快起慢落：起音瞬间跟得上，尾音有余韵 —— 这是"脉冲感"的关键
+            // 快起慢落 —— 脉冲感的关键
             smoothed = peak > smoothed ? peak : smoothed * 0.82 + peak * 0.18;
+            hist.push(smoothed); hist.shift();
+            // 色相在 165°~285°(青→蓝→紫)之间来回漂移，而不是绕满 360°：
+            // 绕满会经过黄绿区间，在白底上又脏又发灰。基准band上限留出余量，
+            // 让脉冲(+55)与火花(+70)的偏移之后仍落在洋红以内、不越到红色。
+            // 参数经实测标定：8 秒内完整扫过 150°→260° 的色带，且加上火花的 +70
+            // 偏移后正好停在 330°(洋红)不溢出到红色。0.06 那种速度 10s 只走 42°，
+            // 整段播放会是一个颜色，看着像"死色"。
+            huePhase += dt * 0.8;
+            hue = 150 + (Math.sin(huePhase) * 0.5 + 0.5) * 110;
+            ringPhase += dt * 0.45;
 
-            hist.push(smoothed);
-            hist.shift();
-            hue = (hue + 0.6) % 360;
+            // 环形占左侧一个方形区域，脉冲占其右侧剩余空间。
+            // 环要够大才有"律动"的气势，同时留出粒子飞溅的余量。
+            const ringR = Math.min(H * 0.34, W * 0.13);
+            const cx = ringR * 1.45 + 10 * dpr;
+            const cy = mid;
+            const pulseX0 = cx + ringR * 1.45 + 14 * dpr;
+            const pulseW = Math.max(0, W - pulseX0 - 8 * dpr);
 
             ctx.clearRect(0, 0, W, H);
 
-            // ---- 第一层：滚动脉冲条（越新越靠右、越亮）----
-            const slotW = W / SLOTS;
-            const barW = Math.max(2 * dpr, slotW * 0.55);
-            for (let i = 0; i < SLOTS; i++) {
-              const v = hist[i];
-              if (v <= 0.001) continue;
-              const age = i / SLOTS;                 // 0=最旧 1=最新
-              const barH = Math.max(2 * dpr, Math.pow(v, 0.75) * mid * 0.92);
-              const h = (hue + age * 90) % 360;      // 沿时间轴渐变色
-              const alpha = 0.25 + age * 0.75;       // 旧的淡、新的实
-              const light = 52 + v * 26;
-              const x = i * slotW + (slotW - barW) / 2;
-              ctx.fillStyle = 'hsla(' + h + ',95%,' + light + '%,' + alpha + ')';
+            // ================= 滚动脉冲（右区） =================
+            if (pulseW > 40 * dpr) {
+              const slotW = pulseW / SLOTS;
+              const barW = Math.max(1.5 * dpr, slotW * 0.55);
+              for (let i = 0; i < SLOTS; i++) {
+                const v = hist[i];
+                if (v <= 0.001) continue;
+                const age = i / SLOTS;
+                const barH = Math.max(1.5 * dpr, Math.pow(v, 0.75) * mid * 0.80);
+                const h = hue + age * 55;                 // 时间轴渐变，幅度收窄以留在冷色区
+                const alpha = 0.22 + age * 0.72;
+                const light = 52 + v * 26 + LB;
+                const x = pulseX0 + i * slotW + (slotW - barW) / 2;
+                ctx.fillStyle = 'hsla(' + h + ',95%,' + light + '%,' + alpha + ')';
+                ctx.beginPath();
+                ctx.roundRect(x, mid - barH, barW, barH * 2, barW / 2);
+                ctx.fill();
+              }
+              // 中心脉冲光带，随音量呼吸
+              const glowH = (1.5 + rms * 22) * dpr;
+              const glow = ctx.createLinearGradient(0, mid - glowH, 0, mid + glowH);
+              glow.addColorStop(0, 'hsla(' + hue + ',100%,' + (70 + LB) + '%,0)');
+              glow.addColorStop(0.5, 'hsla(' + hue + ',100%,' + (78 + LB) + '%,' + ((0.3 + rms * 0.5) * GLOW) + ')');
+              glow.addColorStop(1, 'hsla(' + hue + ',100%,' + (70 + LB) + '%,0)');
+              ctx.fillStyle = glow;
+              ctx.fillRect(pulseX0, mid - glowH, pulseW, glowH * 2);
+
+              // 实时时域波形，作为叠在脉冲上的"心跳线"
+              ctx.save();
+              ctx.lineWidth = 1.4 * dpr;
+              ctx.lineJoin = 'round';
+              ctx.shadowBlur = 9 * dpr * GLOW;
+              ctx.shadowColor = 'hsla(' + ((hue + 40) % 360) + ',100%,' + (70 + LB) + '%,0.65)';
+              ctx.strokeStyle = 'hsla(' + ((hue + 40) % 360) + ',95%,' + (82 + LB * 1.4) + '%,' + (isDark ? 0.5 : 0.7) + ')';
               ctx.beginPath();
-              ctx.roundRect(x, mid - barH, barW, barH * 2, barW / 2);
-              ctx.fill();
+              const px = Math.max(1, Math.floor(wave.length / Math.max(1, pulseW)));
+              let first = true;
+              for (let i = 0; i < wave.length; i += px) {
+                const x = pulseX0 + (i / wave.length) * pulseW;
+                const y = mid + ((wave[i] - 128) / 128) * mid * 0.66;
+                if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
+              }
+              ctx.stroke();
+              ctx.restore();
             }
 
-            // ---- 第二层：实时时域波形（脉冲的"心跳线"）----
-            ctx.save();
-            ctx.lineWidth = 1.5 * dpr;
-            ctx.lineJoin = 'round';
-            ctx.shadowBlur = 10 * dpr;
-            ctx.shadowColor = 'hsla(' + ((hue + 40) % 360) + ',100%,70%,0.7)';
-            // 半透明:让脉冲条当主角,波形线只作为"心跳"叠层
-            ctx.strokeStyle = 'hsla(' + ((hue + 40) % 360) + ',100%,80%,0.55)';
+            // ================= 环形律动（左区，Siri 风格） =================
+            // 中心呼吸光晕
+            const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, ringR * (1 + rms * 0.5));
+            halo.addColorStop(0, 'hsla(' + hue + ',100%,' + (75 + LB) + '%,' + ((0.20 + rms * 0.45) * GLOW) + ')');
+            halo.addColorStop(1, 'hsla(' + hue + ',100%,' + (60 + LB) + '%,0)');
+            ctx.fillStyle = halo;
             ctx.beginPath();
-            // 每个横向像素取一个采样点，线条才顺滑（步长过大会画成折线）
-            const px = Math.max(1, Math.floor(wave.length / Math.max(1, W)));
-            let first = true;
-            for (let i = 0; i < wave.length; i += px) {
-              const x = (i / wave.length) * W;
-              const y = mid + ((wave[i] - 128) / 128) * mid * 0.8;
-              if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
+            ctx.arc(cx, cy, ringR * (1 + rms * 0.5), 0, Math.PI * 2);
+            ctx.fill();
+
+            // 三层环：各层基准半径错开(base)，避免叠成一根粗轮廓；旋向相反 +
+            // 频段与色相错开，才能看出彼此穿插的律动。
+            // 频段区间只取低频部分：人声能量几乎都在前 ~15% 的 bin 里，
+            // 若把某层映射到高频，遇到能量稀薄的素材那层就会退化成一个完美圆。
+            // lo 必须跳过 bin 0（DC/近直流分量恒定偏低），否则镜像后会在角度 0
+            // 处每帧都出现一个尖锐凹口 —— 实测 bin0=26 而 bin1=89、bin2=141。
+            const layers = [
+              { lo: 0.008, hi: 0.090, amp: 0.70, dir:  1, w: 2.4, a: 0.95, hOff:   0, base: 0.36 },
+              { lo: 0.030, hi: 0.170, amp: 0.56, dir: -1, w: 1.9, a: 0.78, hOff:  32, base: 0.57 },
+              { lo: 0.080, hi: 0.300, amp: 0.44, dir:  1, w: 1.5, a: 0.58, hOff:  64, base: 0.76 },
+            ];
+            ctx.save();
+            ctx.lineJoin = 'round';
+            for (let li = 0; li < layers.length; li++) {
+              const L = layers[li];
+              const h = (hue + L.hOff) % 360;
+              ctx.lineWidth = L.w * dpr;
+              ctx.shadowBlur = 16 * dpr * GLOW;
+              ctx.shadowColor = 'hsla(' + h + ',100%,' + (68 + LB) + '%,0.85)';
+              ctx.strokeStyle = 'hsla(' + h + ',95%,' + (74 + LB * 1.3) + '%,' + L.a + ')';
+
+              // 先算出每个角度的半径，再做环形移动平均 —— 频谱逐 bin 抖动很大，
+              // 不平滑的话环会画成"毛线团"而不是优雅的涟漪。
+              const rs = ringSmooth[li];
+              for (let i = 0; i < RING_PTS; i++) {
+                const t = i / RING_PTS;
+                const m = t < 0.5 ? t * 2 : (1 - t) * 2;   // 镜像 -> 左右对称
+                const bin = Math.floor((L.lo + m * (L.hi - L.lo)) * freq.length);
+                // gamma < 1 抬高中低电平，安静段落也看得出起伏
+                const v = Math.pow(freq[Math.min(freq.length - 1, bin)] / 255, 0.65);
+                const target = ringR * (L.base + v * L.amp + rms * 0.12);
+                // 时间维度轻度平滑：跟得上音节，又不会一帧一跳
+                rs[i] = rs[i] ? rs[i] * 0.38 + target * 0.62 : target;
+              }
+              // 3 点环形加权平均：够抹平单 bin 抖动，又保留起伏（5 点会把环磨成正圆）
+              const sm = new Array(RING_PTS);
+              for (let i = 0; i < RING_PTS; i++) {
+                const g = (o) => rs[(i + o + RING_PTS) % RING_PTS];
+                sm[i] = (g(-1) + g(0) * 2 + g(1)) / 4;
+              }
+
+              // 相邻点中点作锚、顶点作控制点画二次曲线 -> 顺滑且自然闭合。
+              // 注意：角度必须和半径用同一个环绕后的索引，否则在接缝处角度继续增大而
+              // 半径跳回 0 号，会画出一个尖锐的缺口（之前就是这个 bug）。
+              const pt = (i) => {
+                const k = ((i % RING_PTS) + RING_PTS) % RING_PTS;
+                const ang = (k / RING_PTS) * Math.PI * 2 + L.dir * ringPhase;
+                return [cx + Math.cos(ang) * sm[k], cy + Math.sin(ang) * sm[k]];
+              };
+              const mid2 = (i) => {
+                const [ax, ay] = pt(i);
+                const [bx, by] = pt(i + 1);
+                return [(ax + bx) / 2, (ay + by) / 2];
+              };
+              ctx.beginPath();
+              const [sx, sy] = mid2(0);
+              ctx.moveTo(sx, sy);
+              // 走满一整圈：最后一段回到起点锚，曲线自然闭合，无需 closePath()
+              for (let i = 1; i <= RING_PTS; i++) {
+                const [xc, yc] = pt(i);
+                const [mx, my] = mid2(i);
+                ctx.quadraticCurveTo(xc, yc, mx, my);
+              }
+              ctx.stroke();
             }
-            ctx.stroke();
             ctx.restore();
 
-            // ---- 第三层：中心脉冲光带，随音量呼吸 ----
-            const glowH = (2 + rms * 26) * dpr;
-            const glow = ctx.createLinearGradient(0, mid - glowH, 0, mid + glowH);
-            glow.addColorStop(0, 'hsla(' + hue + ',100%,70%,0)');
-            glow.addColorStop(0.5, 'hsla(' + hue + ',100%,78%,' + (0.35 + rms * 0.5) + ')');
-            glow.addColorStop(1, 'hsla(' + hue + ',100%,70%,0)');
-            ctx.fillStyle = glow;
-            ctx.fillRect(0, mid - glowH, W, glowH * 2);
+            // ================= 粒子迸发（叠加层） =================
+            // onset：RMS 相对上一帧明显跃升 -> 认定为新音节起音，溅出一簇光点
+            const onset = rms - prevRms;
+            prevRms = rms;
+            if (onset > 0.02 && rms > 0.035 && parts.length < MAX_PARTS) {
+              const n = Math.min(40, Math.round(12 + onset * 260));
+              for (let k = 0; k < n; k++) {
+                // 从环缘沿径向外抛，角度带抖动 -> 像溅出的火花而不是均匀圆环
+                const ang = Math.random() * Math.PI * 2;
+                const spd = (0.6 + Math.random() * 1.8) * (0.5 + rms * 1.8) * ringR * 3.0;
+                parts.push({
+                  x: cx + Math.cos(ang) * ringR * 0.85,
+                  y: cy + Math.sin(ang) * ringR * 0.85,
+                  vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+                  life: 1, decay: 0.7 + Math.random() * 0.8,
+                  r: (1.4 + Math.random() * 2.8) * dpr,
+                  h: hue + 10 + Math.random() * 60,       // 火花色相也留在冷色区
+                });
+              }
+            }
+            ctx.save();
+            for (let i = parts.length - 1; i >= 0; i--) {
+              const p = parts[i];
+              p.life -= p.decay * dt;
+              if (p.life <= 0) { parts.splice(i, 1); continue; }
+              p.x += p.vx * dt; p.y += p.vy * dt;
+              // 阻尼放轻，让火花能飞得更远、散得更开（0.94 会很快聚在环边）
+              p.vx *= 0.975; p.vy *= 0.975;
+              p.vy += 10 * dpr * dt;               // 轻微重力，轨迹更自然
+              const a = Math.pow(p.life, 1.3);
+              ctx.globalAlpha = a;
+              ctx.shadowBlur = 14 * dpr * GLOW;             // 更强的辉光，像火花
+              ctx.shadowColor = 'hsla(' + p.h + ',100%,' + (75 + LB) + '%,1)';
+              ctx.fillStyle = 'hsla(' + p.h + ',95%,' + (78 + (1 - p.life) * 16 + LB * 1.3) + '%,1)';
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, p.r * (0.45 + a * 1.0), 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.restore();
+            ctx.globalAlpha = 1;
           };
-          draw();
+          this.vizRAF = requestAnimationFrame(draw);
         },
 
         stopViz() {

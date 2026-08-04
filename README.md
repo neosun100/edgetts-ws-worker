@@ -37,11 +37,13 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
 Open `/` in a browser. All 322 voices are filterable by language, region, gender, and a
 “multilingual only” toggle — or search by name / ShortName. Each voice shows its full
 `ShortName` with a one-click copy button, so it drops straight into an API call. Playback
-draws a **scrolling pulse waveform** — each syllable reads as a distinct pulse travelling
-along the time axis — and a **light / dark** theme toggle (top-right) is remembered across
-visits.
+draws a three-layer visualizer — a **Siri-style pulsing ring**, **particle bursts** on each
+syllable onset, and a **scrolling pulse waveform** where every syllable travels along the
+time axis. A **light / dark** theme toggle (top-right) is remembered across visits and the
+palette adapts to each theme.
 
-![Pulse visualizer](docs/screenshots/pulse-visualizer.png)
+![Visualizer — dark theme](docs/screenshots/viz-dark.png)
+![Visualizer — light theme](docs/screenshots/viz-light.png)
 
 ![Web UI — light theme with live spectrum](docs/screenshots/ui-voice-picker.png)
 

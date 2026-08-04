@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.4.0] - 2026-08-04
+
+### Added
+- **Siri-style pulsing ring** — three polar-coordinate spectrum rings at staggered radii,
+  counter-rotating, drawn as smoothed closed curves (circular moving-average + quadratic
+  segments) with a breathing central halo.
+- **Particle bursts** — an onset detector (frame-to-frame RMS jump) sprays glowing sparks
+  from the ring edge, with velocity, damping, gravity and lifetime.
+- **Theme-aware palette** — lightness and glow are offset on the light theme, and the hue
+  is constrained to a cool cyan→violet→magenta band (calibrated to sweep the full band in
+  ~8s) so it never drifts into muddy yellow-green or spill into red.
+
+### Fixed
+- **Ring had a sharp notch at angle 0 every frame.** Root cause found by measuring rather
+  than guessing: FFT bin 0 (DC) always reads far lower than its neighbours (26 vs 89/141),
+  so the mirrored mapping produced a dent. The band now skips the DC bin.
+
+![Visualizer](docs/screenshots/viz-dark.png)
+
 ## [2.3.1] - 2026-08-04
 
 ### Changed

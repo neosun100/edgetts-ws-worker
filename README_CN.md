@@ -33,10 +33,11 @@ API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。�
 
 浏览器打开 `/`。322 个音色可按语言、地区、性别、「仅多语言」逐层筛选，也可直接搜名字 /
 ShortName。每个音色都展示完整 `ShortName` 并带一键复制，方便直接粘进 API 调用。播放时绘制
-**滚动脉冲声纹** —— 每个音节都是一道沿时间轴前进的脉冲，右上角可切换**亮色 / 暗夜**主题
-（记忆到本地）。
+三层声纹 —— **Siri 风格环形律动** + 每个音节起音的**粒子迸发** + **滚动脉冲波形**
+（每个音节沿时间轴前进）。右上角可切换**亮色 / 暗夜**主题（记忆到本地），配色随主题自适应。
 
-![脉冲声纹](docs/screenshots/pulse-visualizer.png)
+![声纹 — 暗夜主题](docs/screenshots/viz-dark.png)
+![声纹 — 亮色主题](docs/screenshots/viz-light.png)
 
 ![Web 界面 — 亮色主题与实时声纹](docs/screenshots/ui-voice-picker.png)
 
