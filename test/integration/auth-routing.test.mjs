@@ -284,10 +284,28 @@ test('GET /v1/models with a valid Bearer returns the list; without one it is 401
 });
 
 test('GET /v1/models?neural / ?multilingual filter by id substring', async () => {
+  // Upstream sends FriendlyName, NOT LocalName — verified against the live endpoint:
+  // 322/322 voices have no LocalName field. This fixture used to invent one, which is
+  // why the production bug (every description read "undefined - Female") went unnoticed.
   const voices = [
-    { ShortName: 'zh-CN-XiaoxiaoNeural', Locale: 'zh-CN', Gender: 'Female', LocalName: '晓晓' },
-    { ShortName: 'en-US-AvaMultilingualNeural', Locale: 'en-US', Gender: 'Female', LocalName: 'Ava' },
-    { ShortName: 'en-US-LegacyStandard', Locale: 'en-US', Gender: 'Male', LocalName: 'Legacy' },
+    {
+      ShortName: 'zh-CN-XiaoxiaoNeural',
+      Locale: 'zh-CN',
+      Gender: 'Female',
+      FriendlyName: 'Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)',
+    },
+    {
+      ShortName: 'en-US-AvaMultilingualNeural',
+      Locale: 'en-US',
+      Gender: 'Female',
+      FriendlyName: 'Microsoft AvaMultilingual Online (Natural) - English (United States)',
+    },
+    {
+      ShortName: 'en-US-LegacyStandard',
+      Locale: 'en-US',
+      Gender: 'Male',
+      FriendlyName: 'Microsoft Legacy Online (Natural) - English (United States)',
+    },
   ];
   await withMock({ voices }, async (mock) => {
     const env = { ALLOW_ANONYMOUS: 'true' };
@@ -313,9 +331,11 @@ test('GET /v1/models?neural / ?multilingual filter by id substring', async () =>
     // fetch. Filtering happens on the cached list, per request.
     assert.equal(mock.calls.voices, 1, '7 requests share a single cached upstream fetch');
 
-    // description is "<LocalName> - <Gender>"
+    // description is "<voice name> - <Gender>", with the name extracted from FriendlyName
+    // (the "Microsoft … Online (Natural) - <locale>" wrapper is dropped: locale and
+    // gender are already separate fields).
     const models = await (await worker.fetch(req('/v1/models'), env, {})).json();
-    assert.equal(models[0].description, '晓晓 - Female');
+    assert.equal(models[0].description, 'Xiaoxiao - Female');
     assert.equal(models[2].description, 'Legacy - Male');
   });
 });

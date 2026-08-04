@@ -193,3 +193,72 @@ test('?neural is a documented no-op: every upstream voice is Neural', async () =
     );
   });
 });
+
+// ------------------------------------------------------------------- description
+// Every one of the 322 descriptions read literally "undefined - Female" in production:
+// the code used voice.LocalName, but the upstream list has no such field (verified
+// against the live endpoint on 2026-08-04 — 322/322 missing). The real field is
+// FriendlyName, e.g. "Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)".
+//
+// No test caught it because the fixture was built from the same wrong assumption: it
+// carried a LocalName key whose values were all empty, so the output was "null - Female"
+// rather than "undefined - Female" and nothing asserted on it. The fixture is now a
+// field-faithful snapshot of the real upstream response.
+
+test('no voice description contains undefined or null', async () => {
+  await withMock({}, async () => {
+    const models = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    assert.equal(models.length, 322, 'the fixture is the full upstream list');
+    const broken = models.filter(
+      (m) => !m.description || /undefined|null/.test(m.description)
+    );
+    assert.deepEqual(
+      broken.slice(0, 3),
+      [],
+      broken.length + ' of ' + models.length + ' descriptions are broken'
+    );
+  });
+});
+
+test('a description is the voice name plus gender, not the whole FriendlyName', async () => {
+  await withMock({}, async () => {
+    const models = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    const xiaoxiao = models.find((m) => m.id === 'zh-CN-XiaoxiaoNeural');
+    assert.ok(xiaoxiao, 'the fixture contains a known voice');
+    assert.equal(xiaoxiao.description, 'Xiaoxiao - Female');
+    // Locale and gender are already separate fields, so repeating them adds nothing.
+    for (const m of models) {
+      assert.ok(!m.description.includes('Microsoft '), m.id + ': raw FriendlyName leaked');
+      assert.ok(!m.description.includes('(Natural)'), m.id + ': raw FriendlyName leaked');
+    }
+  });
+});
+
+test('every model carries the fields the UI relies on', async () => {
+  await withMock({}, async () => {
+    const models = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    for (const m of models) {
+      assert.match(m.id, /^[a-z]{2,3}(-[A-Za-z0-9]+)+$/, 'id is a usable ShortName: ' + m.id);
+      assert.match(m.language, /^[a-z]{2,3}-/, m.id + ': language looks like a locale');
+      assert.ok(['Male', 'Female'].includes(m.gender), m.id + ': gender is set');
+      assert.equal(m.object, 'model');
+      assert.equal(m.owned_by, 'microsoft');
+    }
+  });
+});
+
+test('voiceDisplayName degrades safely when upstream changes shape', () => {
+  // Fallbacks, so a future upstream rename produces a usable label rather than the
+  // literal "undefined" this bug shipped. Tested directly: reaching these through the
+  // HTTP surface would need a malformed voice list.
+  const f = __test__.voiceDisplayName;
+  assert.equal(f({ FriendlyName: 'Microsoft Xiaoxiao Online (Natural) - Chinese' }), 'Xiaoxiao');
+  // Unrecognised format: keep the whole string rather than guessing.
+  assert.equal(f({ FriendlyName: 'Totally New Format' }), 'Totally New Format');
+  // Field missing or not a string: fall back to the ShortName, which always exists.
+  assert.equal(f({ ShortName: 'zh-CN-XiaoxiaoNeural' }), 'zh-CN-XiaoxiaoNeural');
+  assert.equal(f({ FriendlyName: '', ShortName: 'a-B-CNeural' }), 'a-B-CNeural');
+  assert.equal(f({ FriendlyName: 42, ShortName: 'a-B-CNeural' }), 'a-B-CNeural');
+  // Nothing usable at all: an empty label, never the string "undefined".
+  assert.equal(f({}), '');
+});

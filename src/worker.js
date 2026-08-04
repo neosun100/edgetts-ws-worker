@@ -346,6 +346,23 @@ var MODELS_CACHE_SECONDS = 21600;           // 与 TTL 一致，供 Cache-Contro
 var voicesCache = { models: null, fetchedAt: 0 };
 var voicesInFlight = null;
 
+/**
+ * 从上游的 FriendlyName 里取出人类可读的音色名。
+ *
+ * 上游字段没有 LocalName —— 322 条里一条都没有（2026-08-04 对线上列表核对过），实际字段是
+ * FriendlyName，形如 "Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)"。原先读
+ * voice.LocalName 使得每一条 description 都是字面量 "undefined - Female"。
+ *
+ * 只取中间那段名字（"Xiaoxiao"），因为语言和性别已经是独立字段，重复一遍没有信息量。
+ * 上游若改了 FriendlyName 的格式，就退回整串原文而不是拼出 undefined。
+ */
+function voiceDisplayName(voice) {
+  const friendly = voice.FriendlyName;
+  if (typeof friendly !== "string" || !friendly) return voice.ShortName || "";
+  const m = /^Microsoft\s+(.+?)\s+Online\b/.exec(friendly);
+  return m ? m[1] : friendly;
+}
+
 function toModel(voice) {
   return {
     id: voice.ShortName,
@@ -354,7 +371,7 @@ function toModel(voice) {
     owned_by: "microsoft",
     language: voice.Locale,
     gender: voice.Gender,
-    description: `${voice.LocalName} - ${voice.Gender}`
+    description: `${voiceDisplayName(voice)} - ${voice.Gender}`
   };
 }
 
@@ -771,13 +788,38 @@ function smartChunkText(text, maxChunkLength) {
     currentChunk = "";
   };
 
-  const sentences = text.split(/([.?!,;:\n。？！，；：\r]+)/g);
-  for (const part of sentences) {
+  // SSML 标签必须整块保留。分隔符里含 `,` 和 `:`，而 `<break time="500ms"/>` 内部就有
+  // 引号和数字后的单位，一旦按分隔符切开，两半各自进不同分块，getSsml 里再转义就变成
+  // 字面量 &lt;break…，被当正文念出来（UI 的「插入停顿」按钮生成的正是这个标签）。
+  // 先把标签整体切出来当作不可分割的原子片段，再对其余文本做正常的标点切分。
+  const SSML_TAG = /<\/?[a-zA-Z][^<>]*\/?>/g;
+  const atoms = [];
+  let cursor = 0;
+  for (const tag of text.matchAll(SSML_TAG)) {
+    if (tag.index > cursor) atoms.push({ text: text.slice(cursor, tag.index), splittable: true });
+    atoms.push({ text: tag[0], splittable: false });
+    cursor = tag.index + tag[0].length;
+  }
+  if (cursor < text.length) atoms.push({ text: text.slice(cursor), splittable: true });
+
+  // 展开成 (片段, 是否可切) 的序列。splittable 必须一路带到下面的硬切分支：一个
+  // `<break time="500ms"/>` 有 21 字符，只要 chunk_size 比它小，硬切照样会把它劈成两半。
+  const sentences = atoms.flatMap((a) =>
+    a.splittable
+      ? a.text.split(/([.?!,;:\n。？！，；：\r]+)/g).map((t) => ({ text: t, splittable: true }))
+      : [{ text: a.text, splittable: false }]
+  );
+  for (const { text: part, splittable } of sentences) {
     if (currentChunk.length + part.length <= maxChunkLength) {
       currentChunk += part;
       continue;
     }
     flush();
+    // 标签宁可超出 chunk_size 也不能切开：超长一点上游能接受，标签断裂则一定被念出来。
+    if (!splittable) {
+      currentChunk = part;
+      continue;
+    }
     // A single segment with no usable break point (e.g. a long unpunctuated paragraph)
     // still has to be split, otherwise it goes upstream over the length limit.
     if (part.length > maxChunkLength) {
@@ -880,6 +922,7 @@ export const __test__ = {
   timingSafeEqual,
   escapeXmlAttr,
   getSsml,
+  voiceDisplayName,
   smartChunkText,
   cleanText,
   // Reset the module-level token cache so tests are order-independent.

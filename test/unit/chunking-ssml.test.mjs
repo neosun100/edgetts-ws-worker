@@ -250,3 +250,70 @@ test('getSsml keeps a <break> whose attribute contains a $ replacement pattern',
   assert.ok(!body.includes('__BREAK_'), `placeholder leaked: ${body}`);
   assert.equal(body, 'x <break time="$&"/> y');
 });
+
+// --------------------------------------------------------------- SSML tag atomicity
+// The UI's "insert pause" button emits `<break time="500ms"/>`, and getSsml passes such
+// tags through unescaped so they act as real SSML. But the chunk delimiters include `,`
+// and `:`, which appear INSIDE the tag, so a tag near a chunk boundary was split in two.
+// Each half then landed in a different chunk, got escaped as `&lt;break…`, and was read
+// aloud as literal text instead of producing a pause.
+
+const tagsIn = (s) => s.match(/<[^>]+>/g) || [];
+
+test('an SSML tag is never split across chunks', () => {
+  const cases = [
+    ['前面一段文字。<break time="500ms"/>后面一段文字。', 20],
+    ['<break time="2s"/>正文开始了这里', 10],
+    ['a。<break time="1s"/>b。<break time="2s"/>c。', 8],
+    ['正文。<break time="1s"/>更多正文。', 300],
+  ];
+  for (const [input, max] of cases) {
+    const chunks = smartChunkText(input, max);
+    for (const tag of tagsIn(input)) {
+      assert.ok(
+        chunks.some((c) => c.includes(tag)),
+        `max=${max}: ${tag} was split across ${JSON.stringify(chunks)}`
+      );
+    }
+    assert.equal(
+      chunks.join('').replace(/\s/g, ''),
+      input.replace(/\s/g, ''),
+      `max=${max}: content changed`
+    );
+  }
+});
+
+test('a tag longer than chunk_size is kept whole rather than cut', () => {
+  // Overshooting chunk_size slightly is fine upstream; a broken tag never is.
+  const tag = '<break time="500ms"/>';
+  const chunks = smartChunkText(tag, 5);
+  assert.deepEqual(chunks, [tag], 'the tag must survive even when it exceeds the limit');
+});
+
+test('tag handling does not change chunking of tag-free text', () => {
+  // Regression guard for the atomicity change: plain text must chunk exactly as before.
+  assert.deepEqual(smartChunkText('第一句。第二句？第三句！', 8), ['第一句。第二句？', '第三句！']);
+  assert.deepEqual(smartChunkText('a'.repeat(25) + '。bbb', 10), [
+    'aaaaaaaaaa',
+    'aaaaaaaaaa',
+    'aaaaa。bbb',
+  ]);
+});
+
+test('tag atomicity covers every position a tag can occupy', () => {
+  // Exercises each branch of the atom scanner: leading tag (no preceding text), trailing
+  // tag (no following text), tag-only input, adjacent tags with nothing between, and a
+  // paired open/close tag.
+  const cases = [
+    ['<break time="1s"/>abc', 50, ['<break time="1s"/>abc']],
+    ['abc<break time="1s"/>', 50, ['abc<break time="1s"/>']],
+    ['<break time="1s"/>', 50, ['<break time="1s"/>']],
+    ['<break time="1s"/><break time="2s"/>', 50, ['<break time="1s"/><break time="2s"/>']],
+    ['<emphasis>词</emphasis>', 50, ['<emphasis>词</emphasis>']],
+    // The tag does not fit in the current chunk, so it starts a new one whole.
+    ['abcdefgh<break time="1s"/>', 10, ['abcdefgh', '<break time="1s"/>']],
+  ];
+  for (const [input, max, expected] of cases) {
+    assert.deepEqual(smartChunkText(input, max), expected, JSON.stringify(input));
+  }
+});
