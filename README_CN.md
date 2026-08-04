@@ -127,6 +127,8 @@ Web UI 用 Web Audio API 在连续时间轴上播放流式 PCM，因此立即开
 | `API_KEY` | secret | `/v1/audio/speech` 所需的 Bearer 令牌。**未设置时 Worker 返回 503**，而非无鉴权放行。 |
 | `ALLOW_ANONYMOUS` | var | 设为 `"true"` 以明确开放访问（无需 key）。 |
 
+> 请求体上限 256KB，`input` 上限 50000 字符；超限返回 413 `payload_too_large`。
+
 ## 开发
 
 ```bash

@@ -137,6 +137,9 @@ Serves the built-in web UI.
 | `API_KEY` | secret | Bearer token required for `/v1/audio/speech`. **Without it the Worker returns 503** rather than serving unauthenticated traffic. |
 | `ALLOW_ANONYMOUS` | var | Set to `"true"` to intentionally run open (no key). |
 
+> Request bodies are capped at 256KB and `input` at 50000 chars; exceeding either
+> returns 413 `payload_too_large`.
+
 ## Development
 
 ```bash

@@ -14,7 +14,7 @@
 | 线上 Worker 逻辑 | `src/worker.js` | 生产代码，反压缩为可读源码 |
 | 线上内嵌前端 | `ui/index.html` | 构建时注入回 Worker |
 | 构建脚本 | `scripts/build.mjs` | `ui/` + `src/` → `dist/worker.js` |
-| 单元测试 | `test/worker.test.mjs` | `npm test`，零外部依赖 |
+| 分层测试 | `test/{unit,integration,regression,e2e}/` | `npm test`，零外部依赖 |
 | 旧 NDJSON 版本 | `legacy/worker-ndjson.js` | 保留：带 WordBoundary 时间戳，`pte-wfd-216` 依赖 |
 | 部署前备份 | `~/backups/edgetts-proxy/` | 含改动前的原始线上版本 |
 
@@ -115,13 +115,19 @@ voice = `x"><prosody rate="-100%">INJECTED</prosody></voice><voice name="y`
 
 > 若未来定位改变（如商用限额），再回到「限流 + 来源白名单」方案；当前明确不做。
 
+---
+
+## P1 — 建议下一步
+
 ### 3. 前端 API key 存储
 key 明文存 `localStorage`，任何 XSS 或同源脚本可读。当前无 `v-html`，XSS 面较小，但建议：
 - 要么改为后端会话（同源 cookie + 服务端持有 key）
 - 要么明确文档化「此 UI 仅供受信任环境使用」
 
-### 4. 请求体大小上限
-已限制 `input` 为 50000 字符，但未限制整体请求体。建议在入口处检查 `Content-Length`。
+### 4. 请求体大小上限 ✅ 已完成
+`input` 限 50000 字符外，整体请求体限 256KB。双重检查：先看 `Content-Length` 快速拒绝，
+再量实际字节数兜底（chunked 传输下没有 `Content-Length`，只靠声明值可被绕过）。
+超限返回 413 `payload_too_large`，附实际值与上限。
 
 ### 5. 长音频的真流式（去掉分块拼接痕迹）
 当前按标点分块后拼接 MP3/PCM。PCM 拼接无痕；但 MP3/AAC 分块拼接在块边界可能有极短的
@@ -138,9 +144,9 @@ WebSocket + NDJSON 协议；生产 `edgetts-proxy` 走 REST 裸流，没有时�
 建议：在 `edgetts-proxy` 上增加一个 `/v1/audio/speech/timestamps` 端点，
 或让 `response_format` 支持 `ndjson` 以合并两套实现。
 
-### 8. CI
-建议加 GitHub Actions：`npm run check`（syntax + 单测）+ 构建产物校验，PR 必过。
-仓库已有 `gh` CLI 可用。
+### 8. CI ✅ 已完成
+GitLab CI（`.gitlab-ci.yml`，主链路）+ GitHub Actions（备份）双跑：
+syntax check + 全量测试 + coverage + build + 校验 dist 不含 `__test__`。
 
 ---
 
@@ -167,7 +173,9 @@ WebSocket + NDJSON 协议；生产 `edgetts-proxy` 走 REST 裸流，没有时�
 ## 命令速查
 
 ```bash
-npm test        # 单元测试（15 项，零依赖）
+npm test        # 单元 + 集成 + 回归（173 项，零依赖）
+npm run test:e2e # E2E，需 EDGETTS_E2E=1
+npm run coverage # 覆盖率（当前 src/worker.js 98.5%）
 npm run check   # 语法检查 + 单测
 npm run build   # ui/ + src/ → dist/worker.js
 npm run deploy  # 构建并部署（需 wrangler + API_KEY secret 已绑定）

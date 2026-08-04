@@ -18,6 +18,8 @@ var FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"
 // All tunable bounds live here rather than as magic numbers at the call sites.
 var LIMITS = {
   MAX_INPUT_CHARS: 50000,
+  // 50000 字符最坏情况(全 4 字节 UTF-8)约 200KB，留出 cleaning_options 等字段的余量
+  MAX_BODY_BYTES: 262144,   // 256 KB
   MIN_SPEED: 0.25,
   MAX_SPEED: 4,
   MIN_PITCH: 0.5,
@@ -134,9 +136,31 @@ async function handleSpeechRequest(request) {
   if (request.method !== "POST") {
     return errorResponse("不允许的方法", 405, "method_not_allowed");
   }
+  // 先看 Content-Length 再读 body：await request.json() 会把整个 body 收进内存后
+  // 才轮到下面的 input 长度校验，等于「先受伤再检查」。一个 input 合法、但塞了
+  // 巨大 cleaning_options 的请求可以绕过 MAX_INPUT_CHARS 白吃内存。
+  const declaredLen = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLen) && declaredLen > LIMITS.MAX_BODY_BYTES) {
+    return errorResponse(
+      `请求体过大：${declaredLen} > ${LIMITS.MAX_BODY_BYTES} 字节`,
+      413,
+      "payload_too_large"
+    );
+  }
   let requestBody;
   try {
-    requestBody = await request.json();
+    // 读成文本先量实际字节数：Content-Length 在 chunked 传输下可能缺失，
+    // 光靠声明值会被绕过。
+    const raw = await request.text();
+    const actualBytes = new TextEncoder().encode(raw).length;
+    if (actualBytes > LIMITS.MAX_BODY_BYTES) {
+      return errorResponse(
+        `请求体过大：${actualBytes} > ${LIMITS.MAX_BODY_BYTES} 字节`,
+        413,
+        "payload_too_large"
+      );
+    }
+    requestBody = JSON.parse(raw);
   } catch {
     return errorResponse("请求体不是合法 JSON", 400, "invalid_request_error");
   }
