@@ -349,11 +349,22 @@ async function handleSpeechRequest(request) {
   // 注意：这不修 `<audio>.duration === null`。那是上游 webm-24khz-16bit-mono-opus 流式封装
   // 的固有特性 —— 单分块响应同样没有 Duration 元素，与拼接无关，Worker 层无法便宜地补上。
   if (contentType === "audio/webm" && textChunks.length > 1) {
+    // 出路必须是**当前真的可行的**那条。已经顶到 MAX_CHUNK_SIZE 时再说「请调大 chunk_size
+    // （上限 2000）」是句无法执行的建议——用户照做也还是失败。这种时候唯一的出路是换格式
+    // 或拆分文本，就只说这个。
+    // 判据是「调到上限**够不够**」，而不是「现在有没有到上限」：文本比 MAX_CHUNK_SIZE
+    // 还长时，调大 chunk_size 也不可能落回单块，此时推荐它同样是白费一次往返。
+    const fitsAtMax = smartChunkText(cleanedInput, LIMITS.MAX_CHUNK_SIZE).length === 1;
+    const wayOut = fitsAtMax
+      ? `请把 chunk_size 调到 ${LIMITS.MAX_CHUNK_SIZE}（该文本可落进单块），或改用 ` +
+        `response_format 为 mp3 / wav。`
+      : `该文本 ${cleanedInput.length} 字符，即使 chunk_size 取上限 ` +
+        `${LIMITS.MAX_CHUNK_SIZE} 也无法落进单块：请改用 response_format 为 mp3 / wav，` +
+        `或把文本拆成多次请求（每次不超过约 ${LIMITS.MAX_CHUNK_SIZE} 字符）。`;
     return errorResponse(
       `opus 不支持多分块：按 chunk_size=${safeChunkSize} 会切成 ${textChunks.length} 块，` +
         `而 WebM 容器拼接后时间戳会在每块开头归零（进度条与拖动失准）。` +
-        `请调大 chunk_size（上限 ${LIMITS.MAX_CHUNK_SIZE}）使其落回单块，` +
-        `或改用 response_format 为 mp3 / wav。`,
+        wayOut,
       400,
       "opus_requires_single_chunk"
     );

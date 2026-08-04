@@ -326,3 +326,61 @@ test('streaming opus is refused too when it would span chunks', async () => {
     mock.restore();
   }
 });
+
+test('the opus error only suggests raising chunk_size when that would actually work', async () => {
+  // An error must not hand out advice the caller cannot act on. The first version said
+  // "raise chunk_size (max 2000)" even when chunk_size was ALREADY 2000, and even when the
+  // text was too long to ever fit one chunk — both send the caller to burn another round
+  // trip on a guaranteed failure. The test is the feasibility of the advice, not the
+  // wording: does raising to the cap actually collapse this text to a single chunk?
+  const MAX = __test__.LIMITS.MAX_CHUNK_SIZE;
+  const unit = '这是一句用来触发多分块的中文文本。'; // 17 chars
+
+  const cases = [
+    // [approx chars, chunk_size, would raising to MAX help?]
+    [900, 300, true],
+    [1500, 50, true],
+    [3400, 300, false],   // too long for one chunk even at the cap
+    [3400, MAX, false],   // already at the cap
+  ];
+
+  for (const [chars, chunkSize, raisingHelps] of cases) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const input = unit.repeat(Math.ceil(chars / unit.length));
+      const res = await worker.fetch(
+        speechRequest({
+          input,
+          voice: 'zh-CN-XiaoxiaoNeural',
+          response_format: 'opus',
+          chunk_size: chunkSize,
+        }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 400, `${input.length} chars @ ${chunkSize} should be refused`);
+      const msg = (await res.json()).error.message;
+      const label = `${input.length} chars @ chunk_size=${chunkSize}`;
+
+      // Cross-check the premise against the real chunker rather than trusting the fixture.
+      assert.equal(
+        __test__.smartChunkText(input, MAX).length === 1,
+        raisingHelps,
+        label + ': fixture assumption about fitting at the cap is wrong'
+      );
+
+      if (raisingHelps) {
+        assert.match(msg, new RegExp('调到\\s*' + MAX), label + ': should point at the cap');
+      } else {
+        assert.doesNotMatch(msg, /请调大|调到/, label + ': must not suggest an impossible raise');
+        assert.match(msg, /mp3|wav/, label + ': must offer a format that works');
+        assert.match(msg, /拆成多次|多次请求/, label + ': must offer splitting the text');
+      }
+      // Always name the actual size so the caller can reason about it.
+      assert.match(msg, new RegExp(String(chunkSize)), label + ': states the chunk_size used');
+    } finally {
+      mock.restore();
+    }
+  }
+});
