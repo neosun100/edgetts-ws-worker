@@ -10,9 +10,12 @@
 // `"![](".repeat(n)`: 4KB → 656ms, 8KB → 4.7s, 16KB → 36s. Fixed by replacing the
 // wildcards with delimiter-excluding classes, which the engine cannot expand past.
 //
-// The budget below is deliberately loose (a CI runner is slower and noisier than a
-// Workers isolate). The bug being guarded is three orders of magnitude over it, so a
-// generous limit still catches a regression without being flaky.
+// The absolute budget below is deliberately generous, because wall-clock is
+// machine-dependent: the same 16000-char payload measures ~55ms on a dev laptop and 273ms
+// on a shared GitLab runner (which is what made a 250ms budget fail in CI). What matters
+// is the order of magnitude — the bug being guarded took 36000ms, i.e. 20x this ceiling
+// even on the slowest runner. The scaling-ratio test below is the machine-independent
+// check and is the one that pins the complexity class.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { __test__ } from '../../src/worker.js';
@@ -27,7 +30,7 @@ function timeClean(text, options) {
   return Number(process.hrtime.bigint() - t0) / 1e6;
 }
 
-const BUDGET_MS = 250;
+const BUDGET_MS = 1500;
 
 test('markdown link/image stripping stays linear on adversarial input', () => {
   // The exact shape that took 36 seconds: dense candidate starts, each with a
