@@ -1,5 +1,37 @@
 # Changelog
 
+## [2.8.0] - 2026-08-04
+
+### Fixed
+- **重复播放时声纹冻结**（由本轮新增的浏览器 e2e 首次运行即抓到）。第 2 次及以后的播放，
+  声纹画面卡住不再变化 —— 实测第 1 次播放 hue 有 7 种取值，第 2、3 次永远是同一个值。
+  根因是一个竞态：`startViz()` 每次会起新的 `requestAnimationFrame` 循环，而**上一次播放
+  遗留的 `source.onended`** 会晚于本次 `startViz` 触发，它调用的 `stopViz()` 取消掉的是
+  **本次**的 RAF 句柄，于是新循环刚起就被杀死，`vizDebug` 保留最后一帧的值 —— 看上去就是
+  「颜色冻结」。修法：给可视化引入「代号」(`vizRun`)，`startViz()` 领号并返回，
+  `stopViz(run)` 只接受当前代号的停止请求，陈旧回调的 stop 自动失效。
+  修复后第 2、3 次播放各有 8 种色相；线上真实浏览器复验：13 帧 / 12 种色相。
+
+### Added
+- **浏览器 e2e（`test/e2e/browser-playback.test.mjs`，5 例）**，用**裸 CDP** 驱动本机
+  Chrome —— 本项目坚持零 `dependencies`/`devDependencies`，因此没有引入 Playwright，
+  而是用 Node 内置 `WebSocket` 写了一个约 100 行的 CDP 客户端（`test/helpers/cdp.mjs`）。
+  无 Chrome 的环境自动 skip，不会把 CI 弄红。覆盖：
+  - **「流式必须调度完整时长」** —— 本项目历史上最严重的 bug（1.67s 截断）此前只靠 grep
+    UI 源码里是否还有 `size > 10000` 这个字符串来防守，**从未真正播放过一次**。现在
+    instrument `AudioBufferSourceNode.start` 累加实际调度的秒数，断言覆盖完整 3s
+    （既不能少于 90%，也不能超过 110% —— 后者会暴露重复调度）
+  - 流式强制 PCM（由 stub 服务端记录 app 真实发出的 `response_format`）
+  - 声纹颜色确实随音频变化（断言色相/饱和有变化量，而不是硬编码区间）
+  - 暗色主题的 toggle→持久化→重载恢复，且断言页面底色 RGB 确实是深色
+- `test/helpers/ui-server.mjs` —— 零依赖 stub 服务端，从 `dist/worker.js` 取出真实 UI，
+  并合成**频谱随时间扫动**的类语音 PCM。（一开始用固定 220Hz 正弦，结果「颜色必须变化」
+  的断言对着正确代码失败 —— 固定频谱本就该产生固定色相；这属于 fixture 不真实，
+  已改为带音节包络 + 基频扫动 + 噪声混比的信号。）
+
+### Changed
+- 测试 184 → **189**；E2E 9 → **14**（其中 5 项浏览器测试在无凭证环境下也会运行）。
+
 ## [2.7.1] - 2026-08-04
 
 ### Added

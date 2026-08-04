@@ -1088,6 +1088,7 @@
           analyser: null,        // 频谱分析节点（两条播放路径共用）
           mediaElSource: null,   // <audio> 的 MediaElementSource（每个元素只能建一次）
           vizRAF: null,          // 可视化动画帧句柄
+          vizRun: 0,             // 可视化「代」序号：只有当前这一代能停掉自己
           vizActive: false,      // 是否显示声纹
           vizDebug: null,        // 当前配色(hue/sat/rms)，供调试与自动化验证
           audioSrc: '',
@@ -1550,7 +1551,8 @@
           }
           // 频谱分析节点 + 启动彩色声纹
           self.ensureAnalyser();
-          self.startViz();
+          // 记住这次播放对应的声纹「代号」，供下面 source.onended 判断是否该由它来收尾
+          const myVizRun = self.startViz();
           
           // 停止之前的播放
           if (self.activeSources) {
@@ -1604,7 +1606,7 @@
                 const idx = self.activeSources.indexOf(source);
                 if (idx > -1) self.activeSources.splice(idx, 1);
                 // 流已接收完且没有在播的 source -> 收起声纹
-                if (!running && self.activeSources.length === 0) self.stopViz();
+                if (!running && self.activeSources.length === 0) self.stopViz(myVizRun);
               };
               
               if (nextPlayTime < self.audioContext.currentTime - 0.1) {
@@ -1803,6 +1805,10 @@
           const wave = new Uint8Array(analyser.fftSize);
           const freq = new Uint8Array(analyser.frequencyBinCount);
           if (this.vizRAF) cancelAnimationFrame(this.vizRAF);
+          // 领一个代号：上一次播放遗留的 source.onended 会晚于本次 startViz 触发，
+          // 若它直接 stopViz() 就会把「本次」的 RAF 循环取消掉，声纹随即冻结
+          // （实测：第 2 次播放起 hue 永远停在同一个值）。带代号后陈旧的 stop 无效。
+          const myRun = ++this.vizRun;
 
           const SLOTS = 110;                // 滚动脉冲条数量
           const hist = new Array(SLOTS).fill(0);
@@ -1858,6 +1864,7 @@
           let lastT = 0;
 
           const draw = (now) => {
+            if (myRun !== this.vizRun) return;   // 已被更新的一代取代，自然退出
             this.vizRAF = requestAnimationFrame(draw);
             // 用真实帧间隔驱动粒子物理，掉帧时运动也不会突变
             const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 0.016;
@@ -2123,11 +2130,15 @@
             ctx.globalAlpha = 1;
           };
           this.vizRAF = requestAnimationFrame(draw);
+          return myRun;
         },
 
-        stopViz() {
+        // run 省略时为强制停止（<audio> 的 ended/pause）；传了 run 则只有那一代自己能停，
+        // 避免上一次播放的回调把当前播放的声纹关掉。
+        stopViz(run) {
+          if (typeof run === 'number' && run !== this.vizRun) return;
           if (this.vizRAF) { cancelAnimationFrame(this.vizRAF); this.vizRAF = null; }
-          // 淡出后隐藏
+          this.vizRun++;               // 让残留的 draw 帧自然退出
           this.vizActive = false;
         },
 

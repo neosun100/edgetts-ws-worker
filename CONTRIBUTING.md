@@ -26,7 +26,16 @@ npm run build       # produce dist/worker.js
 npm run dev         # wrangler dev (needs wrangler)
 ```
 
-E2E tests hit the real upstream and are skipped unless `EDGETTS_E2E=1` is set.
+E2E tests come in two kinds:
+
+- **Browser tests** (`test/e2e/browser-playback.test.mjs`) drive a real Chrome over raw
+  CDP against a local stub server. They need no credentials and run by default; they skip
+  automatically if no Chrome binary is found (override with `CHROME_PATH`).
+- **Network tests** hit the real deployment and are skipped unless `EDGETTS_E2E=1` is set
+  (plus `EDGETTS_E2E_KEY` for the authenticated endpoints).
+
+Note the zero-dependency rule: the browser tests use Node's built-in `WebSocket` and a
+~100-line CDP client rather than Playwright, so `npm install` stays a no-op.
 
 ## Pull requests
 
