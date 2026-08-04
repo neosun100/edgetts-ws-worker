@@ -456,6 +456,67 @@ async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
     if (!aborted) inFlight.clear();
   }
 }
+/**
+ * 把多个完整的 WAV 分块合并成单个合法 WAV。
+ *
+ * 做法：保留第一块的头部（含它自己的 fmt 块，采样率/位深/声道数由 FORMAT_MAP 固定，
+ * 所有分块必然一致），把每一块的 data 负载抽出来接在一起，再改写 RIFF 与 data 两处
+ * 长度字段。头部长度不能假设是 44 字节 —— 上游可能插入 LIST/fact 等附加块，所以按
+ * RIFF 的 (id, size) 结构真正遍历到 data 块为止。
+ *
+ * 任何一块不像 WAV（缺 RIFF/WAVE 魔数或找不到 data 块）就退回裸拼接：那说明上游换了
+ * 格式，此时猜测比原样透传更危险，且降级会记进日志而不是静默发生。
+ */
+async function concatWavBlobs(blobs, contentType) {
+  const buffers = await Promise.all(blobs.map((b) => b.arrayBuffer()));
+  const parsed = [];
+  for (const buf of buffers) {
+    const view = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+    const magic = (off) => String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
+    if (buf.byteLength < 12 || magic(0) !== "RIFF" || magic(8) !== "WAVE") {
+      console.warn("WAV 合并：分块缺少 RIFF/WAVE 魔数，退回裸拼接");
+      return new Blob(blobs, { type: contentType });
+    }
+    // 遍历 RIFF 子块找到 data，而不是假设头部固定 44 字节。
+    let offset = 12;
+    let data = null;
+    while (offset + 8 <= buf.byteLength) {
+      const id = magic(offset);
+      const size = view.getUint32(offset + 4, true);
+      const body = offset + 8;
+      if (id === "data") {
+        // 上游可能把 size 写成 0 或超出实际长度（流式生成的 WAV 常见），
+        // 以实际剩余字节为准，避免截断或越界。
+        const usable = Math.min(size || buf.byteLength - body, buf.byteLength - body);
+        data = { start: body, length: usable, headerEnd: body };
+        break;
+      }
+      offset = body + size + (size % 2); // RIFF 块按偶数字节对齐
+    }
+    if (!data) {
+      console.warn("WAV 合并：分块里找不到 data 块，退回裸拼接");
+      return new Blob(blobs, { type: contentType });
+    }
+    parsed.push({ bytes, data });
+  }
+
+  const header = parsed[0].bytes.slice(0, parsed[0].data.headerEnd);
+  const totalData = parsed.reduce((sum, p) => sum + p.data.length, 0);
+  const out = new Uint8Array(header.length + totalData);
+  out.set(header, 0);
+  let write = header.length;
+  for (const p of parsed) {
+    out.set(p.bytes.subarray(p.data.start, p.data.start + p.data.length), write);
+    write += p.data.length;
+  }
+  // 改写两处长度：RIFF size（不含前 8 字节）与 data size。
+  const outView = new DataView(out.buffer);
+  outView.setUint32(4, out.length - 8, true);
+  outView.setUint32(header.length - 4, totalData, true);
+  return new Blob([out], { type: contentType });
+}
+
 async function getVoice(textChunks, concurrency, ...ttsArgs) {
   const allAudioBlobs = [];
   const contentType = ttsArgs[5] || "audio/mpeg";
@@ -466,8 +527,16 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
       const audioBlobs = await Promise.all(audioPromises);
       allAudioBlobs.push(...audioBlobs);
     }
-    const concatenatedAudio = new Blob(allAudioBlobs, { type: contentType });
-    return new Response(concatenatedAudio, {
+    // WAV 是带头部的容器：裸拼接 N 个分块等于把 N 个完整 RIFF 文件首尾相接，
+    // 播放器读到第一个头里的 data 长度就停了，后面全部音频被静默丢弃。默认
+    // chunk_size=300，所以约 300 字符以上的输入就会触发——用户听到的是被截断的
+    // 语音，且响应是 200 + 合法 WAV，无法与正常结果区分。mp3/pcm 不受影响
+    // （前者帧自同步、后者无头部），opus/webm 无法在此层安全合并，见下。
+    const audioBody =
+      contentType === "audio/wav" && allAudioBlobs.length > 1
+        ? await concatWavBlobs(allAudioBlobs, contentType)
+        : new Blob(allAudioBlobs, { type: contentType });
+    return new Response(audioBody, {
       headers: { "Content-Type": contentType, ...makeCORSHeaders() }
     });
   } catch (error) {
@@ -680,7 +749,7 @@ function smartChunkText(text, maxChunkLength) {
         if (slice.length === maxChunkLength) {
           if (slice.trim()) chunks.push(slice.trim());
         } else {
-          currentChunk = slice; // keep the tail open for the next segment
+          if (slice.trim()) chunks.push(slice.trim());
         }
       }
     } else {
@@ -697,13 +766,21 @@ function cleanText(text, options) {
   // which reads aloud as bracket noise. Extracting the link text first turns it into
   // `docs`, and any bare URL left over is removed in the URL pass below.
   if (options.remove_markdown) {
-    cleanedText = cleanedText.replace(/!\[.*?\]\(.*?\)/g, "");
-    cleanedText = cleanedText.replace(/\[(.*?)\]\(.*?\)/g, "$1");
+    // 定界符用「排除自身的字符类」而不是 .*? / .+? —— 这是 ReDoS 防线，不是风格偏好。
+    // 懒量词并不免疫灾难性回溯：`\[(.*?)\]\(.*?\)` 遇到 "![](" 重复 N 次这种畸形输入时，
+    // 每个 `[` 都是一个候选起点，而 `.*?` 会为每个起点逐字符扩张去找 `](`，匹配到了 `\)`
+    // 又失败、回溯再扩张，复杂度是超线性的。实测 4KB 输入 656ms、8KB 4.7s、16KB 36s，
+    // 而 Workers 的 CPU 上限是 10ms —— 一个远小于 MAX_BODY_BYTES 的请求就能打爆 Worker。
+    // 换成 [^\]]* / [^)]* 后引擎无法跨越定界符扩张，16KB 从 36156ms 降到 42ms（863 倍），
+    // 且对合法 Markdown 的输出逐例一致（见 test/unit/redos.test.mjs 的等价性断言）。
+    cleanedText = cleanedText.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
+    cleanedText = cleanedText.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
     cleanedText = cleanedText.replace(/(\*\*|__)(.*?)\1/g, "$2");
     // Single * / _ emphasis. The underscore form requires non-word boundaries so it
     // doesn't eat delimiters inside snake_case identifiers (my_func_name → my_func_name).
     cleanedText = cleanedText.replace(/\*(?!\s)(.+?)\*/g, "$1");
-    cleanedText = cleanedText.replace(/(^|[^\w])_(?!\s)(.+?)_(?![\w])/g, "$1$2");
+    // 同上：(.+?) 换成 ([^_]+)，否则 " _a" 重复 N 次时 48KB 要 322ms。
+    cleanedText = cleanedText.replace(/(^|[^\w])_(?!\s)([^_]+)_(?![\w])/g, "$1$2");
     cleanedText = cleanedText.replace(/`{1,3}(.*?)`{1,3}/g, "$1");
     cleanedText = cleanedText.replace(/#{1,6}\s/g, "");
   }
