@@ -14,8 +14,16 @@ import assert from 'node:assert/strict';
 import { chromeAvailable, launchChrome } from '../helpers/cdp.mjs';
 import { startUiServer } from '../helpers/ui-server.mjs';
 
-const HAVE_CHROME = await chromeAvailable();
-const SKIP = HAVE_CHROME ? false : 'no Chrome binary available for browser e2e';
+// Probing Chrome must itself be bounded. On a 2-core CI runner a browser that starts but
+// never becomes controllable left this await hanging at module load, before any test
+// registered — so the job showed no failure, no skip, just in_progress until the job-level
+// timeout. Racing against a timer turns that into a clean skip with a reason.
+const HAVE_CHROME = await Promise.race([
+  chromeAvailable().catch(() => false),
+  // unref() so the loser of the race cannot keep the process alive on its own.
+  new Promise((r) => setTimeout(() => r(false), 30000).unref()),
+]);
+const SKIP = HAVE_CHROME ? false : 'Chrome unavailable or not launchable — browser e2e skipped';
 
 const PCM_SECONDS = 3;   // well past the old 1.67s truncation point
 

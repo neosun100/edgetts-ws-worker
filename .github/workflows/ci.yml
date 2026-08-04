@@ -13,6 +13,10 @@ jobs:
   test:
     name: Test & Build
     runs-on: ubuntu-latest
+    # The suite finishes in about 30s locally. A cap well above that turns any future hang
+    # into a fast, legible failure instead of a job that sits in_progress for six hours
+    # burning runner minutes — which is exactly what a Chrome-that-never-starts did.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
