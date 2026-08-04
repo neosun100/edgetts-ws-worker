@@ -32,6 +32,19 @@
       --code-bg: rgba(255, 255, 255, 0.75);
       --code-text: #334155;
       --viz-bg: rgba(255, 255, 255, 0.55);
+      --page-base: #f0fdfa;
+      --badge-bg: #ede9fe;
+      --badge-text: #6d28d9;
+      --badge-border: #ddd6fe;
+      --info-bg: #dbeafe;
+      --info-text: #1d4ed8;
+      --info-border: #93c5fd;
+      --ok-bg: #dcfce7;
+      --ok-text: #166534;
+      --ok-border: #86efac;
+      --err-bg: #fee2e2;
+      --err-text: #dc2626;
+      --err-border: #fca5a5;
     }
 
     /* 暗夜霓虹主题 —— 深空底色 + 青/紫霓虹强调 */
@@ -45,6 +58,11 @@
       --border-color: #334155;
       --text-color: #e2e8f0;
       --mint-accent: #22d3ee;
+      /* mint-* 原本是近白的薄荷色，暗色下必须一起覆盖，否则任何用到它们的元素
+         （页面背景、.voice-current 当前音色条）都会变成一大块白。 */
+      --mint-start: #0f2b2e;
+      --mint-middle: #10262f;
+      --mint-end: #1a1130;
       --page-bg: radial-gradient(1200px 600px at 15% -10%, #1e1b4b 0%, transparent 55%),
                  radial-gradient(1000px 500px at 110% 20%, #0e7490 0%, transparent 50%),
                  linear-gradient(160deg, #0b1020 0%, #0f172a 55%, #020617 100%);
@@ -58,6 +76,31 @@
       --code-bg: rgba(2, 6, 23, 0.7);
       --code-text: #7dd3fc;
       --viz-bg: rgba(2, 6, 23, 0.55);
+      --page-base: #020617;
+      /* 徽章与状态条：浅底深字在暗色下会像贴纸，改成深底亮字 */
+      --badge-bg: rgba(129, 140, 248, 0.18);
+      --badge-text: #c7d2fe;
+      --badge-border: rgba(129, 140, 248, 0.45);
+      --info-bg: rgba(37, 99, 235, 0.18);
+      --info-text: #bfdbfe;
+      --info-border: rgba(59, 130, 246, 0.45);
+      --ok-bg: rgba(22, 163, 74, 0.18);
+      --ok-text: #bbf7d0;
+      --ok-border: rgba(34, 197, 94, 0.45);
+      --err-bg: rgba(220, 38, 38, 0.18);
+      --err-text: #fecaca;
+      --err-border: rgba(248, 113, 113, 0.45);
+    }
+
+    /* 让原生控件(滚动条、number 步进器、下拉箭头)跟随主题；
+       只靠自定义 CSS 管不到这些浏览器绘制的部件。 */
+    :root { color-scheme: light; }
+    [data-theme="dark"] { color-scheme: dark; }
+
+    /* 原生 select 展开后的选项由系统绘制，不显式指定的话暗色下可能是浅字浅底 */
+    select option {
+      background-color: var(--input-bg);
+      color: var(--text-color);
     }
 
     * {
@@ -67,6 +110,10 @@
     html {
       padding: 0;
       margin: 0;
+      /* body 用 background-attachment: fixed，只覆盖视口大小；页面比视口高时，
+         超出部分会露出浏览器默认白底(实测页面 1789px / 视口 1080px，下方 700px 发灰)。
+         给 html 铺一层同色兜底即可，滚动到底也是连续的深色。 */
+      background-color: var(--page-base);
     }
 
     body {
@@ -223,9 +270,9 @@
       font-weight: 600;
       padding: 0.1rem 0.4rem;
       border-radius: 999px;
-      background: #ede9fe;
-      color: #6d28d9;
-      border: 1px solid #ddd6fe;
+      background: var(--badge-bg);
+      color: var(--badge-text);
+      border: 1px solid var(--badge-border);
       white-space: nowrap;
     }
 
@@ -422,6 +469,8 @@
       gap: 0.5rem;
     }
 
+    /* type=number 不匹配上面 input[type=text] 那组选择器，必须自己声明主题色，
+       否则暗色下这个停顿时长输入框是个白底方块。 */
     .pause-input {
       width: 6.5em;
       padding: 0.4rem 0.6rem;
@@ -429,6 +478,9 @@
       border-radius: 6px;
       font-size: 0.9rem;
       text-align: center;
+      background-color: var(--input-bg);
+      color: var(--text-color);
+      transition: background-color 0.3s, color 0.3s, border-color 0.2s;
     }
 
     .pause-input:focus {
@@ -567,21 +619,21 @@
     }
 
     .status-info {
-      background-color: #dbeafe;
-      color: #1d4ed8;
-      border: 1px solid #93c5fd;
+      background-color: var(--info-bg);
+      color: var(--info-text);
+      border: 1px solid var(--info-border);
     }
 
     .status-success {
-      background-color: #dcfce7;
-      color: #166534;
-      border: 1px solid #86efac;
+      background-color: var(--ok-bg);
+      color: var(--ok-text);
+      border: 1px solid var(--ok-border);
     }
 
     .status-error {
-      background-color: #fee2e2;
-      color: #dc2626;
-      border: 1px solid #fca5a5;
+      background-color: var(--err-bg);
+      color: var(--err-text);
+      border: 1px solid var(--err-border);
     }
 
     audio {
@@ -624,7 +676,9 @@
       border-radius: 8px;
       padding: 1rem;
       margin-bottom: 1.5rem;
-      background-color: rgba(248, 250, 252, 0.8);
+      /* 用主题变量而不是写死的近白色，否则暗色下「API 配置」是一大块灰白 */
+      background-color: var(--subtle-bg);
+      transition: background-color 0.3s, border-color 0.3s;
     }
 
     summary {
