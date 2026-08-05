@@ -1374,10 +1374,16 @@
             try { src.stop(); } catch (e) { /* 已结束的 source 再 stop 会抛，忽略 */ }
           }
           this.activeSources = [];
-          // 2) 中止仍在读的流式响应，否则后续分块还会继续排进来
-          if (this.streamReader) {
-            try { this.streamReader.cancel(); } catch (e) { /* 已关闭则忽略 */ }
-            this.streamReader = null;
+          // 2) 中止仍在读的流式响应，否则后续分块还会继续排进来。
+          //    先清字段再 cancel：cancel() 返回 promise 且可能同步抛，若在它之后才清空，
+          //    重入（停止键连点、或紧接着又发起一次生成）会拿到同一个 reader 再 cancel 一遍。
+          //    reader 在读完时会由读取循环置回 null，所以这里只会碰到真正在读的那个——
+          //    此前没清导致一个早已完成的 reader 被反复 cancel，与新一次 fetch 撞出
+          //    间歇性的 "Failed to fetch"（e2e 里表现为 scheduled calls 偶发为 0）。
+          const reader = this.streamReader;
+          this.streamReader = null;
+          if (reader) {
+            try { reader.cancel(); } catch (e) { /* 已关闭则忽略 */ }
           }
           // 3) 停掉 <audio>（标准播放路径）
           const el = this.$refs.audioPlayer;
@@ -1574,7 +1580,7 @@
             self.streamReader = reader;   // 供 stopAllPlayback() 中止仍在读的流
             while (true) {
               const { done, value } = await reader.read();
-              if (done) break;
+              if (done) { self.streamReader = null; break; }   // 用完即清，见 stopAllPlayback
               
               if (self.streamStats.ttfb === 0) {
                 self.streamStats.ttfb = Date.now() - startTime;
@@ -1725,6 +1731,7 @@
             while (true) {
               const { done, value } = await reader.read();
               if (done) {
+                self.streamReader = null;   // 用完即清，见 stopAllPlayback
                 playBuffer(); // 播放剩余数据
                 break;
               }
