@@ -243,12 +243,34 @@ test('getSsml handles empty text and text that is only a break tag', () => {
   assert.equal(prosodyBody(getSsml('<break time="500ms"/>', 'v', '0', '0', 'general')), '<break time="500ms"/>');
 });
 
-test('getSsml keeps a <break> whose attribute contains a $ replacement pattern', () => {
-  // Restoration uses a function replacement, so `$&`/`$'` in a break attribute are
-  // inserted literally instead of expanding to the internal placeholder.
-  const body = prosodyBody(getSsml('x <break time="$&"/> y', 'v', '0', '0', 'general'));
+test('restoring break placeholders treats $ literally, never expanding replacement patterns', () => {
+  // The restore step uses a function replacement so $&, $` and $1 in the surrounding TEXT
+  // cannot expand and leak the internal __BREAK_<nonce> placeholder into the SSML. This
+  // used to put the $ inside time="$&", but that time value is now correctly rejected as
+  // malformed and escaped — the $ hazard lives in the text either way, so test it there.
+  const body = prosodyBody(getSsml('pre $& $1 <break time="1s"/> post', 'v', '0', '0', 'general'));
+  // The internal placeholder must never leak — that is the actual guarantee.
   assert.ok(!body.includes('__BREAK_'), `placeholder leaked: ${body}`);
-  assert.equal(body, 'x <break time="$&"/> y');
+  // The $ patterns survive as literal text; the & is (correctly) XML-escaped, and the
+  // break stays a real tag. What must NOT happen is $& expanding into the SSML.
+  assert.equal(body, 'pre $&amp; $1 <break time="1s"/> post');
+});
+
+test('a malformed <break> is escaped to harmless text, not shipped as broken SSML', () => {
+  // Upstream returns 400 for a non-self-closing break, an invalid time ("abc"), or a
+  // negative time — and the caller then saw the misleading "voice does not exist" error
+  // (verified live: the voice was valid). The break regex now preserves only well-formed
+  // self-closing breaks; anything else becomes escaped text, which upstream accepts.
+  for (const bad of ['<break time="abc"/>', '<break time="-5s"/>', '<break time="1s">']) {
+    const body = prosodyBody(getSsml('a ' + bad + ' b', 'v', '0', '0', 'general'));
+    assert.match(body, /&lt;break/, bad + ' must be escaped, got: ' + body);
+    assert.doesNotMatch(body, /<break/, bad + ' must not survive as a real tag');
+  }
+  // The forms upstream accepts stay real tags (measured against the live endpoint).
+  for (const ok of ['<break time="1s"/>', '<break time="500ms"/>', '<break time="0.5s"/>', '<break/>']) {
+    const body = prosodyBody(getSsml('a ' + ok + ' b', 'v', '0', '0', 'general'));
+    assert.ok(body.includes(ok), ok + ' must be preserved verbatim, got: ' + body);
+  }
 });
 
 // --------------------------------------------------------------- SSML tag atomicity

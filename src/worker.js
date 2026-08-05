@@ -1140,7 +1140,15 @@ function getSsml(text, voiceName, rate, pitch, style) {
   // while everything else in the text is escaped. The placeholder includes a random
   // token so text that literally contains the placeholder string cannot forge a tag.
   const nonce = crypto.randomUUID().replace(/-/g, "");
-  const breakTagRegex = /<break\s+time="[^"]*"\s*\/?>|<break\s*\/?>|<break\s+time='[^']*'\s*\/?>/gi;
+  // 只保留**格式正确**的 <break>,其余(含未自闭合的 <break time="1s">、非法/负数 time)
+  // 落到下面的转义分支,变成无害的正文,而不是原样透传给上游。
+  //
+  // 之前的正则太宽:time="[^"]*" 会吞下 "abc"、"-5s";末尾 /? 让 <break time="1s">(无斜杠)
+  // 也被当标签保留。这三种上游都回 400,而调用方看到的却是「voice 不存在」那句误导性错误
+  // (实测 voice 明明合法)。收紧后:必须自闭合(/>),time 若有则为可选负号后跟数字、
+  // 可选小数、可选 s/ms 单位 —— 与实测上游接受的形态一致(接受 "1s"/"500ms"/"0.5s"/"1",
+  // 拒绝 "abc"/"-5s"/无斜杠)。负号允许进正则、但值非法的交给上游判(这里只挡明显畸形)。
+  const breakTagRegex = /<break(?:\s+time=(?:"[0-9]+(?:\.[0-9]+)?(?:ms|s)?"|'[0-9]+(?:\.[0-9]+)?(?:ms|s)?'))?\s*\/>/gi;
   const breakTags = [];
   const processedText = text.replace(breakTagRegex, (match) => {
     const placeholder = `__BREAK_${nonce}_${breakTags.length}__`;
