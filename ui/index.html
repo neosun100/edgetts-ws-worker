@@ -1093,7 +1093,16 @@
   </div>
 
   <!-- Vue 3 CDN -->
-  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <!-- 固定版本并加 SRI。此前是 vue@3 浮动版本、无完整性校验:unpkg 只缓存 60s，
+       所以页面会静默采用新发布的 Vue（实测当前解析到 3.5.40），而这个脚本能读到
+       localStorage 里明文存的 API key —— CDN 一旦被污染，key 就随之泄漏。
+       SRI 让浏览器在摘要不匹配时直接拒绝执行，crossorigin 是 SRI 校验的前置要求。
+       升级 Vue 时需同时更新版本号与摘要:
+         curl -sL <CDN>/vue@<版本>/dist/vue.global.js | openssl dgst -sha384 -binary | openssl base64 -A -->
+  <script src="https://unpkg.com/vue@3.5.40/dist/vue.global.js"
+          integrity="sha384-xZGBZ8/+QRtMg/kJMPyo4v1otVc8kxjAeiKnaCg+yBlIxeE+11fWfYLJAM6BdWbc"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
 
   <script>
     const { createApp } = Vue;

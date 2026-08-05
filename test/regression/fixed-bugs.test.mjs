@@ -559,3 +559,51 @@ test('BUG#10 a mid-window chunk failure must not raise unhandledRejection', asyn
     mock.restore();
   }
 });
+
+// ---------------------------------------------------------------------------
+// BUG 11: the shipped UI loaded Vue from `unpkg.com/vue@3` — a floating major
+// version with no integrity check and only 60s of CDN caching, so the page
+// silently adopted whatever Vue was published (measured: resolving to 3.5.40).
+// That script can read the API key the UI stores in localStorage, so a poisoned
+// CDN response would leak it.
+//
+// Separately, this made the browser e2e suite depend on an external CDN: when
+// unpkg was slow or unreachable from the browser, page.goto timed out
+// ("page load timeout") or the page came up with no window.Vue and zero
+// .voice-item — symptoms that look like the app is broken. The harness now
+// serves Vue from a local cache instead.
+// ---------------------------------------------------------------------------
+test('BUG#11 the shipped Vue is version-pinned with an integrity hash', () => {
+  const tag = UI.match(/<script[^>]*unpkg\.com[^>]*>/);
+  assert.ok(tag, 'the UI still loads Vue from a CDN (update this test if that changes)');
+  const attrs = tag[0];
+  // A floating `vue@3` is what allowed silent version drift.
+  assert.doesNotMatch(attrs, /vue@3\/|vue@3"/, 'the version must be exact, not floating');
+  assert.match(attrs, /vue@\d+\.\d+\.\d+\//, 'an exact semver is pinned');
+  // SRI needs both attributes to actually be enforced.
+  assert.match(attrs, /integrity="sha(256|384|512)-[A-Za-z0-9+/=]+"/, 'a real SRI digest');
+  assert.match(attrs, /crossorigin="anonymous"/, 'crossorigin is required for SRI to apply');
+});
+
+test('BUG#11b the browser harness serves Vue locally, not from the CDN', async () => {
+  // Pins the hermetic property: if someone reverts the harness to letting the browser
+  // fetch unpkg, the suite goes back to failing whenever that CDN hiccups.
+  const { startUiServer } = await import('../helpers/ui-server.mjs');
+  const server = await startUiServer({ pcmSeconds: 1 });
+  try {
+    const res = await fetch(server.url + '/');
+    const html = await res.text();
+    assert.doesNotMatch(html, /unpkg\.com/, 'the served HTML must not reference the CDN');
+    assert.match(html, /src="\/vendor\/vue\.global\.js"/, 'it points at the local route');
+
+    // And that route must actually serve JavaScript, not a 404 the page would ignore.
+    const vue = await fetch(server.url + '/vendor/vue.global.js');
+    assert.equal(vue.status, 200, 'the local Vue route responds');
+    assert.match(vue.headers.get('content-type') || '', /javascript/);
+    const body = await vue.text();
+    assert.ok(body.length > 100000, 'it is the real Vue bundle, got ' + body.length + ' bytes');
+    assert.match(body, /createApp/, 'and it exposes the API the UI uses');
+  } finally {
+    await server.close();
+  }
+});

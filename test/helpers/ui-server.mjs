@@ -4,7 +4,7 @@
 // <audio> for containers) without depending on Microsoft or on network conditions —
 // so the "streaming must not truncate" regression can be asserted deterministically.
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { readFileSync as readFileSyncSync } from 'node:fs';
 import { __test__ } from '../../src/worker.js';
 const { mergeWebmChunks } = __test__;
@@ -72,6 +72,43 @@ export function opusFixture() {
   return opusCache;
 }
 
+/**
+ * 本地供给 Vue，而不是让浏览器去 unpkg 拉。
+ *
+ * 这是本套件长期间歇性失败的根因:UI 用 <script src="https://unpkg.com/..."> 加载 Vue，
+ * 于是每个浏览器测试都隐含依赖外部 CDN。CDN 一慢或不通，page.goto 就在
+ * readyState=complete 上超时（报 "page load timeout"），或者页面起来了但 window.Vue
+ * 不存在、DOM 里一个 .voice-item 都没有 —— 症状看起来像被测代码坏了。实测同一时刻
+ * node 侧 curl unpkg 三次都是 200，而 headless Chrome 侧时通时不通。
+ *
+ * 首次运行时下载到 test/.cache/（已 gitignore，不进仓库），之后离线也能跑。拿不到且无缓存
+ * 时返回 null，调用方据此跳过浏览器测试并说明原因 —— 比让它们以超时的形式失败清楚得多。
+ */
+const VUE_CACHE = join(root, 'test/.cache/vue.global.js');
+const VUE_URL = 'https://unpkg.com/vue@3.5.40/dist/vue.global.js';
+let vueBytes;
+
+export async function ensureVue() {
+  if (vueBytes !== undefined) return vueBytes;
+  try {
+    vueBytes = await readFile(VUE_CACHE);
+    return vueBytes;
+  } catch { /* 没缓存，去下载 */ }
+  try {
+    const res = await fetch(VUE_URL);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const buf = Buffer.from(await res.arrayBuffer());
+    await mkdir(dirname(VUE_CACHE), { recursive: true });
+    await writeFile(VUE_CACHE, buf);
+    vueBytes = buf;
+  } catch (e) {
+    console.warn('[ui-server] 无法获取 Vue（' + e.message + '）：浏览器测试将跳过。' +
+                 '联网后重跑一次即可缓存到 test/.cache/。');
+    vueBytes = null;
+  }
+  return vueBytes;
+}
+
 const VOICES = [
   { id: 'zh-CN-XiaoxiaoNeural', object: 'model', created: 0, owned_by: 'microsoft', language: 'zh-CN', gender: 'Female', description: '晓晓 - Female' },
   { id: 'en-US-AvaNeural', object: 'model', created: 0, owned_by: 'microsoft', language: 'en-US', gender: 'Female', description: 'Ava - Female' },
@@ -97,7 +134,21 @@ export async function startUiServer(opts = {}) {
     pcmSeconds = 3, chunkMs = 200, chunkDelayMs = 15,
     failSpeech = 0, failSpeechPlainText = false, emptyStream = false,
   } = opts;
-  const html = await extractUiHtml();
+  const vue = await ensureVue();
+  let html = await extractUiHtml();
+  // 把 unpkg 换成本地路径，并去掉 integrity —— 摘要是给线上那份 CDN 响应算的，
+  // 本地这份字节相同但走的是不同 URL，保留 crossorigin/integrity 只会带来无谓的失败面。
+  // 标签是多行的（src / integrity / crossorigin / referrerpolicy 各占一行），
+  // 所以必须用 [\s\S] 跨行匹配 —— [^>]* 在这里匹配不到。
+  // 只匹配「带 src 且指向 unpkg 的」那个标签。此前从任意 <script 起匹配，会先撞上
+  // 页面里别的 script，把中间大段内容一起吞掉。标签本身是多行的，所以用 [\s\S]。
+  html = html.replace(
+    /<script\s+src="https:\/\/unpkg\.com[\s\S]*?<\/script>/,
+    '<script src="/vendor/vue.global.js"></script>'
+  );
+  if (html.includes('unpkg.com')) {
+    throw new Error('ui-server: 未能把 Vue 的 CDN 引用替换成本地路径，浏览器测试会依赖外网');
+  }
   const stats = { speechRequests: 0, lastBody: null, bytesSent: 0 };
 
   const server = createServer(async (req, res) => {
@@ -179,6 +230,12 @@ export async function startUiServer(opts = {}) {
         res.end(wav);
       }
       return;
+    }
+
+    if (url.pathname === '/vendor/vue.global.js') {
+      if (!vue) { res.writeHead(503); return res.end(); }
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Content-Length': vue.length });
+      return res.end(vue);
     }
 
     if (url.pathname === '/favicon.svg' || url.pathname === '/favicon.ico') {

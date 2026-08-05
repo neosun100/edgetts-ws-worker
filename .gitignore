@@ -6,3 +6,6 @@ dist/
 .wrangler/
 .omc/
 .playwright-mcp/
+
+# 浏览器测试用的 Vue 本地缓存(首次联网运行时自动下载,之后可离线跑)
+test/.cache/
