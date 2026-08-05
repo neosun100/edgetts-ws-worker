@@ -269,7 +269,13 @@ test('every degradation path leaves a trace in the log', async () => {
     checks.push(['fallback voice list', mock.logs.some((l) => l.msg.includes('获取语音列表失败'))]);
   });
 
-  // 3. expired token reused because the token endpoint is down
+  // 3. a still-valid cached token reused because the token endpoint is down.
+  //    (`tokenExp: 120` is 120 seconds of remaining life — inside the 5-minute refresh
+  //    margin, so the refresh fires, but the token itself is NOT expired. This case used to
+  //    be labelled "expired token", and that wording in two separate tests is what hid a
+  //    real bug: the genuinely-expired case was never covered, and the fallback handed a dead
+  //    token to upstream, which surfaced to callers as "voice does not exist". Both branches
+  //    are now pinned in test/integration/token-lifecycle.test.mjs.)
   __test__.resetTokenCache();
   const tokenMock = installMockFetch({ tokenExp: 120 });
   try {
@@ -286,8 +292,8 @@ test('every degradation path leaves a trace in the log', async () => {
       globalThis.fetch = real;
     }
     checks.push([
-      'stale token',
-      tokenMock.logs.some((l) => l.msg.includes('过期的缓存 Token')),
+      'cached token fallback',
+      tokenMock.logs.some((l) => l.msg.includes('缓存 Token 兜底')),
     ]);
   } finally {
     tokenMock.restore();
@@ -324,7 +330,34 @@ test('every degradation path leaves a trace in the log', async () => {
     anonMock.restore();
   }
 
+  // 7. DECLINING to degrade. The rule cuts both ways: choosing not to substitute is also a
+  //    decision the operator needs to see, and it must be distinguishable from the successful
+  //    fallback in (3). Without this line, "token endpoint down, nothing salvageable" and
+  //    "token endpoint down, rode it out on cache" look the same in the log.
+  __test__.resetTokenCache();
+  const deadMock = installMockFetch({ tokenExp: -10 });
+  try {
+    await worker.fetch(speechRequest({ input: 'warm', voice: 'en-US-AvaNeural' }), ANON, {});
+    const real = globalThis.fetch;
+    globalThis.fetch = async (i, init) => {
+      const u = typeof i === 'string' ? i : i.url;
+      if (u.includes('dev.microsofttranslator.com')) return new Response('down', { status: 503 });
+      return real(i, init);
+    };
+    try {
+      await worker.fetch(speechRequest({ input: 'x', voice: 'en-US-AvaNeural' }), ANON, {});
+    } finally {
+      globalThis.fetch = real;
+    }
+    checks.push([
+      'refusing an expired token',
+      deadMock.logs.some((l) => l.msg.includes('缓存 Token 已过期')),
+    ]);
+  } finally {
+    deadMock.restore();
+  }
+
   const silent = checks.filter(([, logged]) => !logged).map(([name]) => name);
   assert.deepEqual(silent, [], 'these degradations happen silently: ' + silent.join(', '));
-  assert.equal(checks.length, 6, 'all six paths were exercised');
+  assert.equal(checks.length, 7, 'all seven paths were exercised');
 });

@@ -1119,9 +1119,27 @@ async function fetchEndpoint(now) {
     return data;
   } catch (error) {
     console.error("获取端点失败:", error);
-    if (tokenInfo.token) {
-      console.log("使用过期的缓存 Token 作为备用");
+    // 缓存 token 只有**还没到期**时才配得上当兜底。getEndpoint 提前 5 分钟就刷新，
+    // 所以这里的缓存通常是「还有几分钟寿命」的，拿它顶过一次上游抖动是划算的。
+    //
+    // 但原来的判断只看 `tokenInfo.token` 存不存在，过期的照样返回。结果是一条谁都
+    // 想不到的因果链：token 端点挂 + 缓存已过期 → 返回死 token → 上游 401 → 401 属
+    // 可重试 → forceRefresh → token 端点还是挂 → 又返回同一个死 token → 三次耗尽 →
+    // 抛出 status 401 → getVoice 把 4xx 当调用方错误 → 回给用户「voice 不存在，请用
+    // GET /v1/models 里的 id」。真实原因是我们自己的 token 拿不到，却让调用方去换音色。
+    // 实测复现：status=400 + 那句音色文案，token 端点被调用 3 次。
+    // `tokenInfo.expiredAt &&` is redundant for behaviour — `n < null` is already false —
+    // and a mutation run will flag dropping it as a surviving mutant. It is an equivalent
+    // mutant, not a coverage gap: the guard is kept so the intent (both fields must be
+    // populated) reads explicitly rather than resting on a coercion rule.
+    if (tokenInfo.token && tokenInfo.expiredAt && Date.now() / 1e3 < tokenInfo.expiredAt) {
+      const leftSec = tokenInfo.expiredAt - Date.now() / 1e3;
+      console.warn(`token 刷新失败，改用仍有效的缓存 Token 兜底（剩余 ${(leftSec / 60).toFixed(1)} 分钟）`);
       return tokenInfo.endpoint;
+    }
+    if (tokenInfo.token) {
+      // 有缓存但已过期：拿它去打上游是必然 401，只会把真实原因掩埋成音色错误。
+      console.error("token 刷新失败且缓存 Token 已过期，不再用它兜底");
     }
     throw error;
   }

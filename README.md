@@ -207,6 +207,22 @@ A chunk failing for a non-retryable reason stops the pool rather than draining t
 chunks: the response is already lost, and each further call would spend one of the 50
 subrequests Cloudflare allows per invocation.
 
+### Failure attribution
+
+A `4xx` means the request needs changing; a `5xx` means this service or its upstream failed.
+The distinction is maintained deliberately, because getting it wrong sends callers to debug
+the wrong thing. Two cases worth naming:
+
+- An upstream rejection of a well-formed request (most often a `voice` that matches the name
+  pattern but does not exist) is reported as 400 `upstream_rejected_request`, not 500 — the
+  fix is on the caller's side.
+- A token-fetch failure is reported as 500 `tts_generation_error`, even though upstream
+  answered 401. The Microsoft token is this service's own dependency; the caller's request was
+  fine. This previously surfaced as 400 with a "voice does not exist" message, via a chain
+  where a dead cached token was retried until the attempts ran out and the final 401 was
+  mapped to a caller error. The cached token is now only used as a fallback while it is still
+  valid.
+
 ## Configuration
 
 | Var | Type | Purpose |
