@@ -109,8 +109,24 @@ test('streaming playback schedules the FULL duration (no 1.67s truncation)', { s
   const outcome = await chrome.page.evaluate('window.__done');
   assert.equal(outcome, 'ok', 'generateSpeech(stream) resolved without error');
 
-  const sched = await chrome.page.evaluate('window.__sched');
-  assert.ok(sched.calls > 0, 'at least one buffer was scheduled');
+  // generateSpeech catches its own errors, so "ok" does NOT mean the fetch succeeded — a
+  // transient network failure showed up here as calls === 0 and the assertion blamed
+  // scheduling. Report the status line the app displayed, which names the real cause.
+  const sched = await chrome.page.evaluate(
+    '({ ...window.__sched, status: String(document.querySelector(".status").textContent).trim() })'
+  );
+  // Distinguish "the app failed to fetch" from "the app fetched but scheduled nothing".
+  // Only the second is this test's subject; the first is environmental and must not be
+  // reported as a truncation regression. The stub server records every request it served.
+  assert.ok(
+    server.stats.speechRequests > 0 && server.stats.bytesSent > 0,
+    'the stub never served audio, so this run says nothing about scheduling ' +
+      '(app reported: ' + JSON.stringify(sched.status) + ')'
+  );
+  assert.ok(
+    sched.calls > 0,
+    'audio was served but nothing was scheduled; the app reported: ' + JSON.stringify(sched.status)
+  );
   // The whole point: total scheduled audio must cover the full clip, not ~1.67s.
   assert.ok(
     sched.totalSeconds > PCM_SECONDS * 0.9,
