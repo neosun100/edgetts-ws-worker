@@ -4,7 +4,7 @@
 // must not pull in Playwright/Puppeteer. Chrome is already on the machine and CDP runs
 // over a WebSocket, which Node has built in — so a ~100-line client is enough to drive
 // a real browser and evaluate JS in the page.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -56,6 +56,11 @@ export async function chromeAvailable() {
 export async function launchChrome({ port = 0, timeoutMs = 15000 } = {}) {
   const bin = await findChrome();
   if (!bin) throw new Error('no Chrome binary found');
+  // 泄漏的实例会抢端口和 CPU,让 page.goto 超时、fetch 失败,而且症状是「偶发」的 ——
+  // 我为此追了五轮才发现是自己的探针脚本被 `timeout` 掐掉、finally 里的 close() 没跑,
+  // 累积了 248 个 headless Chrome。这里只是把它变成一条显式警告,不自动杀进程:
+  // 误杀用户自己的浏览器比留个警告糟得多。
+  warnIfLeaked();
   const userDataDir = await mkdtemp(join(tmpdir(), 'edgetts-cdp-'));
   const chosenPort = port || 9500 + Math.floor(Math.random() * 400);
 
@@ -164,6 +169,29 @@ export async function launchChrome({ port = 0, timeoutMs = 15000 } = {}) {
       }
     },
   };
+}
+
+/**
+ * 数一下有多少个本套件启动过、却没被回收的 headless Chrome。只看 --user-data-dir 里带
+ * edgetts-cdp- 前缀的进程,所以不会把用户平时开的浏览器算进来。
+ */
+let leakWarned = false;
+function warnIfLeaked() {
+  if (leakWarned) return;
+  leakWarned = true;   // 每个进程只提醒一次,别把测试输出刷满
+  try {
+    const out = execFileSync("/bin/sh", ["-c", "pgrep -f edgetts-cdp- | wc -l"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const n = Number(out.trim());
+    if (n > 20) {
+      console.warn(
+        "[cdp] 检测到 " + n + " 个残留的测试用 Chrome 进程。它们会抢端口与 CPU，" +
+        "使 page.goto 超时、fetch 偶发失败。清理：pkill -f \"edgetts-cdp-\""
+      );
+    }
+  } catch { /* pgrep 不可用（非 Unix）时静默跳过 */ }
 }
 
 function connect(wsUrl) {

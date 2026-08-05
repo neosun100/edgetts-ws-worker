@@ -100,32 +100,21 @@ test('streaming playback schedules the FULL duration (no 1.67s truncation)', { s
 
   // Kick off streaming playback through the app's own code path, with a fresh counter.
   //
-  // Retry once on a fetch failure, and be explicit that the cause is NOT understood.
+  // Kick off streaming playback through the app's own code path, with a fresh counter.
   //
-  // This test drives the app's real fetch against a local stub. Roughly one run in three the
-  // fetch fails outright, the app reports "Failed to fetch", nothing is scheduled, and the
-  // assertion below reads like a truncation regression. Reproduced deterministically once
-  // (round 1 of a 6-round loop) but not since; five separate hypotheses were tested and all
-  // ruled out: the goto/close/goto navigation pattern (4 variants, all clean), a cold-start
-  // race (4 fresh browsers, all clean), server.closeAllConnections() (clean with and
-  // without), and navigation aborting an in-flight fetch (that surfaces as AbortError, not
-  // "Failed to fetch"). So the trigger is still unknown.
-  //
-  // The retry is therefore a deliberate compromise, not a fix: it separates "the request
-  // never happened" from "the audio was truncated", which is the only thing this test is
-  // about. The stub-served-audio assertion further down is what makes a vacuous pass
-  // impossible. A second consecutive failure still fails the test.
-  const startStreaming = `(() => {
+  // This used to retry on a fetch failure, because roughly one run in three the app reported
+  // "Failed to fetch" and scheduled nothing. The cause turned out to be my own probe scripts:
+  // killing them with `timeout` skipped their `finally { chrome.close() }`, leaking headless
+  // Chrome processes — 248 of them by the time I checked. Those competed for ports and CPU,
+  // which is why it looked intermittent and why every in-file hypothesis came up empty.
+  // With the leak cleaned up the retry is unnecessary, and keeping it would mask a real
+  // failure later.
+  await chrome.page.evaluate(`(() => {
     window.__sched = { totalSeconds: 0, calls: 0, lastEnd: 0 };
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;
     window.__done = vm.generateSpeech(true).then(() => 'ok', (e) => 'err: ' + e.message);
     return true;
-  })()`;
-  await chrome.page.evaluate(startStreaming);
-  await chrome.page.evaluate('window.__done');
-  if ((await chrome.page.evaluate('window.__sched')).calls === 0) {
-    await chrome.page.evaluate(startStreaming);
-  }
+  })()`);
 
   const outcome = await chrome.page.evaluate('window.__done');
   assert.equal(outcome, 'ok', 'generateSpeech(stream) resolved without error');
@@ -470,17 +459,33 @@ test('Opus playback covers the whole clip, not just the first container', { skip
       el.addEventListener('loadedmetadata', r, { once: true });
       setTimeout(r, 8000);
     });
-    // Force Chrome to resolve the real duration of an unknown-length Segment.
+    // Sample BEFORE any seek: that is the whole point of the injected Duration.
+    const durationAtMeta = el.duration;
+    const seekableAtMeta = el.seekable.length ? el.seekable.end(0) : null;
+    // Then force resolution anyway, so the assertions below still hold either way.
     try { el.currentTime = 1e9; } catch (e) {}
     await new Promise((r) => setTimeout(r, 1500));
     return {
+      durationAtMeta, seekableAtMeta,
       duration: el.duration,
       seekable: el.seekable.length ? el.seekable.end(0) : null,
       errCode: el.error ? el.error.code : null,
     };
   })()`);
 
+  const ONE_CHUNK_SECONDS = 9.45;
   assert.equal(expected.errCode, null, 'the merged WebM decodes without error');
+  // With the injected top-level Duration, duration/seekable are available at
+  // loadedmetadata — no seek-past-the-end needed. Before the injection both were null and
+  // the native progress bar sat blank until the user happened to scrub.
+  assert.ok(
+    typeof expected.durationAtMeta === 'number' && isFinite(expected.durationAtMeta),
+    'duration must be known at loadedmetadata, got ' + expected.durationAtMeta
+  );
+  assert.ok(
+    expected.seekableAtMeta > ONE_CHUNK_SECONDS * 2,
+    'the whole clip is seekable straight away, got ' + expected.seekableAtMeta
+  );
   assert.ok(
     typeof expected.duration === 'number' && isFinite(expected.duration),
     'a merged container yields a real duration, got ' + expected.duration
@@ -489,7 +494,6 @@ test('Opus playback covers the whole clip, not just the first container', { skip
   // Before the merge only the first was reachable, so the discriminating threshold is
   // "clearly more than one chunk" — expressed relative to the chunk length rather than as a
   // magic number, so it keeps its meaning if the fixtures are ever regenerated.
-  const ONE_CHUNK_SECONDS = 9.45;
   assert.ok(
     expected.duration > ONE_CHUNK_SECONDS * 2,
     'duration must span all three chunks, not stop at the first (' +

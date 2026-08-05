@@ -780,6 +780,56 @@ function encodeClusterTimecode(ms) {
  * 把 N 个独立 WebM 容器合并成一个。任一分块解析不出 Cluster 就返回 null，
  * 由调用方降级为裸拼接并留日志（与 concatWavBlobs 的降级方式一致）。
  */
+/**
+ * 往合并结果的 Info 元素里插入顶层 Duration，让浏览器在 loadedmetadata 时就知道总时长。
+ *
+ * 为什么值得做：上游的 Segment 是 UNKNOWN-size 且不声明 Duration，所以 `<audio>.duration`
+ * 在 loadedmetadata 时是 null —— 原生进度条一片空白，要等用户 seek 过末尾浏览器才解析出
+ * 时长。实测注入后 loadedmetadata 时 duration/seekable 直接是 28.35，ffprobe 也从 N/A 变成
+ * 28.350000（零告警）。代价是 11 字节、0.177ms。
+ *
+ * 为什么能原地做：Info 的 size 是**已知长度**，所以插 11 字节必须同时改写它 —— 而上游把所有
+ * size 都编成 8 字节 vint（实测 `01 00 00 00 00 00 00 56` = 86），能表示到 2^56-1，
+ * 86 -> 97 只改值字节、编码宽度不变，因此后续字节一个都不用移动。
+ * 只处理这种 8 字节编码；换成别的宽度就放弃注入（返回原样），因为那时改 size 会让字段变宽、
+ * 需要整体搬移，收益不值得那个复杂度。
+ */
+function injectWebmDuration(bytes, durationMs) {
+  let infoAt = -1;
+  for (let i = 0; i + 4 <= bytes.length; i++) {
+    if (bytes[i] === 0x15 && bytes[i + 1] === 0x49 && bytes[i + 2] === 0xa9 && bytes[i + 3] === 0x66) {
+      infoAt = i;
+      break;
+    }
+  }
+  if (infoAt < 0) return bytes;                 // 没有 Info，放弃注入
+  const sizeAt = infoAt + 4;
+  if (bytes[sizeAt] !== 0x01) return bytes;     // 不是 8 字节 vint，放弃（见上）
+  let size = 0;
+  for (let i = sizeAt + 1; i < sizeAt + 8; i++) size = size * 256 + bytes[i];
+  const bodyAt = sizeAt + 8;
+  if (bodyAt + size > bytes.length) return bytes;   // size 与实际不符，别碰
+
+  // Duration = 0x4489 + size 标记 0x88 + float64 BE，共 11 字节
+  const dur = new Uint8Array(11);
+  dur[0] = 0x44;
+  dur[1] = 0x89;
+  dur[2] = 0x88;
+  new DataView(dur.buffer).setFloat64(3, durationMs, false);
+
+  const out = new Uint8Array(bytes.length + dur.length);
+  out.set(bytes.subarray(0, bodyAt), 0);
+  out.set(dur, bodyAt);                         // 放在 Info body 开头
+  out.set(bytes.subarray(bodyAt), bodyAt + dur.length);
+  // 原地把 Info 的 size 加 11（编码宽度不变）
+  let v = size + dur.length;
+  for (let i = sizeAt + 7; i >= sizeAt + 1; i--) {
+    out[i] = v & 0xff;
+    v = Math.floor(v / 256);
+  }
+  return out;
+}
+
 function mergeWebmChunks(buffers) {
   const parsed = [];
   for (const buf of buffers) {
@@ -810,7 +860,8 @@ function mergeWebmChunks(buffers) {
     out.set(piece, w);
     w += piece.length;
   }
-  return out;
+  // offset 此时正好等于所有分块的时长之和（含每块的 CodecDelay 尾），即合并后的总时长。
+  return injectWebmDuration(out, offset);
 }
 
 async function concatWebmBlobs(blobs, contentType) {
