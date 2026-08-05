@@ -137,6 +137,11 @@ test('a slow chunk does not stall the other slots (no batch barrier)', async () 
     concurrency: WIDTH,
     // Chunk 0 is slow; every other chunk is fast. Under a barrier, chunk 0 holds its whole
     // batch, so only the first `WIDTH` chunks can ever be in flight during its 400ms.
+    //
+    // The 400/4 spread is a 100x margin, and it is deliberate: a sibling test in
+    // streaming.test.mjs used a 12ms margin between adjacent chunks and was transposed by
+    // timer skew on a CI runner. Keep this ratio large. Anything that needs a *tight* timing
+    // margin should be sequenced on promises instead, the way that test now is.
     delayFor: (i) => (i === 0 ? 400 : 4),
     watchIndex: 0,
   });
@@ -163,6 +168,11 @@ test('a slow chunk does not stall the other slots (no batch barrier)', async () 
 test('output is byte-identical at every concurrency level', async () => {
   // A scheduler change must not alter the audio. Latency is deliberately INVERTED here —
   // later chunks answer first — so any reliance on completion order shows up immediately.
+  //
+  // The 6ms spacing is fine here even though a 12ms spacing raced elsewhere, because this test
+  // never asserts WHAT order upstream completed in. If skew reorders two completions, the
+  // assertion (identical bytes) must still hold — that is the property under test. Inverted
+  // latency raises the odds of exposing order-dependence; it is not load-bearing.
   const results = [];
   for (const concurrency of [1, 2, 5, 20]) {
     __test__.resetTokenCache();

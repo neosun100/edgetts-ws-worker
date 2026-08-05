@@ -108,17 +108,47 @@ test('multi-chunk stream emits every chunk exactly once, in chunk order, despite
   __test__.resetTokenCache();
   const N = 8;
   const completionOrder = [];
+
+  // Reverse completion is enforced by CHAINING, not by racing sleeps: chunk i does not answer
+  // until chunk i+1 has answered, and the last chunk answers immediately.
+  //
+  // This used to be `await sleep((N - i) * 12)`, leaving only 12ms between adjacent chunks.
+  // It failed on GitLab CI with exactly 2 and 3 transposed — adjacent, i.e. the smallest-margin
+  // pair — while the byte-order assertion below passed. The product was fine; the fixture raced.
+  //
+  // Honest about the evidence: I could NOT reproduce this locally, including with all cores
+  // saturated (0/8 runs failed). Measured here, setTimeout deviates by at most 2.8ms against
+  // that 12ms gap, so ordering never flips on this machine. The runner exceeded 12ms of
+  // relative skew. So the trigger is not proven to be CPU contention specifically — but the
+  // mechanism does not need reproduction: a 12ms margin between two independent timers is not
+  // a guarantee, and the observed transposition is precisely what breaching it looks like.
+  //
+  // Same mistake as the CPU-budget test in test/unit/redos.test.mjs: a wall-clock quantity
+  // treated as deterministic. Sequencing on explicit promises removes the timing dependency
+  // instead of widening the gap and hoping — the gap can always be too small on some machine.
+  //
+  // The chain requires all N chunks to be in flight simultaneously, which `concurrency: N`
+  // below provides. With a smaller window a chunk would wait on one that has not started yet
+  // and the test would hang rather than fail, so that coupling is asserted before the request.
+  const gates = Array.from({ length: N }, () => {
+    let release;
+    return { done: new Promise((resolve) => { release = resolve; }), release: () => release() };
+  });
   const mock = installMockFetch({
-    // Later chunks answer first (chunk 7 fastest, chunk 0 slowest) so arrival order is the
-    // reverse of write order. Any ordering bug shows up as a byte-level mismatch.
     synth: async ({ ssml }) => {
       const i = markIndexOf(ssml);
-      await sleep((N - i) * 12);
+      if (i < N - 1) await gates[i + 1].done;
       completionOrder.push(i);
+      gates[i].release();
       return { body: payloadFor(i) };
     },
   });
   try {
+    // The gate chain deadlocks unless every chunk can be in flight at once.
+    assert.ok(
+      N <= __test__.LIMITS.MAX_CONCURRENCY,
+      'the fixture needs all ' + N + ' chunks in flight, so N must not exceed MAX_CONCURRENCY'
+    );
     const res = await worker.fetch(
       speechRequest({ input: markedInput(N), stream: true, chunk_size: CHUNK_SIZE, concurrency: N }, KEY),
       ENV,
@@ -132,7 +162,8 @@ test('multi-chunk stream emits every chunk exactly once, in chunk order, despite
     assert.equal(bytes.length, expected.length, 'total bytes = sum of chunk sizes');
     assert.deepEqual(bytes, expected, 'bytes are chunk payloads concatenated in chunk order');
 
-    // Prove the test actually exercised out-of-order completion.
+    // Prove the test actually exercised out-of-order completion. Exact and deterministic:
+    // the chain above makes reverse order a causal guarantee, not a timing outcome.
     assert.deepEqual(
       completionOrder,
       Array.from({ length: N }, (_, i) => N - 1 - i),
