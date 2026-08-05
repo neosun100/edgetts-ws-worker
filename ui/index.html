@@ -1499,12 +1499,16 @@
           } catch (error) {
             console.error('Error generating speech:', error);
             this.updateStatus('错误: ' + error.message, 'error');
-            // 声纹的 RAF 循环只在 source.onended 里停。流式失败时（上游 500、网络断开、
-            // 权限被拒）可能一个 AudioBufferSourceNode 都没排上，那个回调永远不触发，
-            // 循环就以约 120fps 无限空转烧 CPU 和电量，直到用户关页面。实测失败后 0.8
-            // 秒内 vizRAF 句柄从 3 涨到 101。这里必须无参调用 stopViz（强制停止），
-            // 传代号的版本会因为代际检查而对已失败的一代放行不管。
-            this.stopViz();
+            // 走完整的收尾，而不只是停声纹。原因有两层：
+            // 1) 声纹的 RAF 循环只在 source.onended 里停，而流式失败时（上游 500、网络断开、
+            //    0 字节响应）可能一个 AudioBufferSourceNode 都没排上，那个回调永远不触发，
+            //    循环就以约 120fps 无限空转烧 CPU 和电量。实测失败后 0.8 秒内 vizRAF 句柄
+            //    从 3 涨到 101。
+            // 2) 只调 stopViz 会把 isPlaying 留在 true，于是「停止」按钮赖在界面上不消失，
+            //    而此时已经没有任何音频可停 —— 又是一个假的控制权。
+            // stopAllPlayback 内部无参调用 stopViz（强制停止）：传代号的版本会因为代际检查
+            // 而对已失败的一代放行不管。
+            this.stopAllPlayback();
           } finally {
             this.isLoading = false;
             this.isStreaming = false;
@@ -1592,6 +1596,15 @@
 
             running = false;
             self.streamStats.elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+
+            // 同 PCM 路径：0 字节的 200 不是成功，而是请求在边缘被掐断的样子。
+            const receivedBytes = audioChunks.reduce((sum, c) => sum + c.length, 0);
+            if (receivedBytes === 0) {
+              throw new Error(
+                '服务器返回了 0 字节音频。响应状态是 200，但内容为空 —— 通常是请求在边缘' +
+                '被中断（文本过长导致超出 CPU/内存限制）。请缩短文本或调大 chunk_size 后重试。'
+              );
+            }
 
             // Container formats need the full byte range before they can be decoded,
             // so playback starts once the stream completes.
@@ -1774,7 +1787,18 @@
             
             // 创建下载用的 WAV 文件
             const totalLength = allPcmData.reduce((sum, arr) => sum + arr.length, 0);
-            
+
+            // 一个字节都没收到 ≠ 成功。Cloudflare 在响应头发出后掐掉 isolate（超 CPU/内存）
+            // 时，客户端看到的是 200 + 干净的 chunked EOF —— 与完整响应的收尾字节完全相同，
+            // 没有 Content-Length 可核对。此前这里无条件报「✅ PCM完成！0KB, 约0.0秒」并给出
+            // 下载按钮，用户会以为合成成功了、只是音频莫名很短。
+            if (totalLength === 0) {
+              throw new Error(
+                '服务器返回了 0 字节音频。响应状态是 200，但内容为空 —— 通常是请求在边缘' +
+                '被中断（文本过长导致超出 CPU/内存限制）。请缩短文本或调大 chunk_size 后重试。'
+              );
+            }
+
             const pcmBuffer = new Uint8Array(totalLength);
             let offset = 0;
             for (const chunk of allPcmData) {

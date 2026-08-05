@@ -86,13 +86,16 @@ const VOICES = [
  *  - chunkDelayMs: delay between chunks, to simulate a slow upstream
  *  - failSpeech: when set, /v1/audio/speech answers with this status instead of audio —
  *    for asserting that the UI cleans up after a failure
+ *  - emptyStream: answer a streaming request with 200 and zero bytes, the way a request
+ *    killed at the edge looks to the client — a clean chunked EOF with nothing to
+ *    reconcile against, which is why the UI could not tell it from success
  *  - failSpeechPlainText: with failSpeech, answer with a text/plain body (like the bare
  *    503 Cloudflare itself returns) instead of the JSON error shape
  */
 export async function startUiServer(opts = {}) {
   const {
     pcmSeconds = 3, chunkMs = 200, chunkDelayMs = 15,
-    failSpeech = 0, failSpeechPlainText = false,
+    failSpeech = 0, failSpeechPlainText = false, emptyStream = false,
   } = opts;
   const html = await extractUiHtml();
   const stats = { speechRequests: 0, lastBody: null, bytesSent: 0 };
@@ -133,6 +136,11 @@ export async function startUiServer(opts = {}) {
       const isStream = body.stream === true;
       const fmt = body.response_format || 'mp3';
 
+      if (isStream && emptyStream) {
+        res.writeHead(200, { 'Content-Type': 'audio/pcm', 'Access-Control-Allow-Origin': '*' });
+        res.end();
+        return;
+      }
       if (isStream) {
         // Stream raw PCM in small pieces, like the real worker does.
         res.writeHead(200, { 'Content-Type': 'audio/pcm', 'Access-Control-Allow-Origin': '*' });

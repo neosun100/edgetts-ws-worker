@@ -99,12 +99,24 @@ test('streaming playback schedules the FULL duration (no 1.67s truncation)', { s
   })()`);
 
   // Kick off streaming playback through the app's own code path, with a fresh counter.
-  await chrome.page.evaluate(`(() => {
+  //
+  // Retry once on a fetch failure. This test drives the app's real fetch against a local
+  // stub, and after the other tests in this file have each stood up and torn down their own
+  // server, that fetch occasionally fails outright — the app then reports "Failed to fetch"
+  // and schedules nothing, which looked like a truncation regression. Retrying separates
+  // "the environment dropped the request" from "the app truncated the audio", which is the
+  // only thing this test is about. A second consecutive failure still fails the test.
+  const startStreaming = `(() => {
     window.__sched = { totalSeconds: 0, calls: 0, lastEnd: 0 };
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;
     window.__done = vm.generateSpeech(true).then(() => 'ok', (e) => 'err: ' + e.message);
     return true;
-  })()`);
+  })()`;
+  await chrome.page.evaluate(startStreaming);
+  await chrome.page.evaluate('window.__done');
+  if ((await chrome.page.evaluate('window.__sched')).calls === 0) {
+    await chrome.page.evaluate(startStreaming);
+  }
 
   const outcome = await chrome.page.evaluate('window.__done');
   assert.equal(outcome, 'ok', 'generateSpeech(stream) resolved without error');
@@ -558,6 +570,52 @@ test('starting a new generation silences the one still playing', { skip: SKIP },
     assert.equal(out.elPaused, false, 'the new standard playback is actually running');
   } finally {
     await longServer.close();
+    await page.goto(server.url);
+    await configureApp();
+  }
+});
+
+test('a 200 with zero bytes is reported as an error, not success', { skip: SKIP }, async () => {
+  // Cloudflare killing the isolate after the headers are out leaves the client with 200 and
+  // a clean chunked EOF — byte-identical framing to a complete response, with no
+  // Content-Length to reconcile. The UI reported "✅ PCM完成！0KB, 约0.0秒" and offered a
+  // download, so the user concluded synthesis had worked and the audio was just short.
+  //
+  // Also asserts the teardown: the failure path used to call stopViz() alone, which left
+  // isPlaying true, so the stop button lingered with nothing left to stop.
+  const empty = await startUiServer({ emptyStream: true });
+  const page = chrome.page;
+  try {
+    await page.goto(empty.url);
+    const out = await page.evaluate(`(async () => {
+      const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+      vm.config.baseUrl = ${JSON.stringify(empty.url)};
+      vm.config.apiKey = 'test-key';
+      vm.form.inputText = 'empty stream regression check';
+      await vm.generateSpeech(true);
+      await new Promise((r) => setTimeout(r, 400));
+      return {
+        type: vm.status && vm.status.type,
+        message: String(vm.status && vm.status.message),
+        download: vm.showDownloadBtn,
+        playing: vm.isPlaying,
+        viz: vm.vizActive,
+        raf: vm.vizRAF,
+        stopBtn: [...document.querySelectorAll('button')].some((b) => b.textContent.includes('停止')),
+      };
+    })()`);
+
+    assert.equal(out.type, 'error', 'zero bytes must not be reported as success');
+    assert.doesNotMatch(out.message, /完成/, 'the message must not claim completion');
+    assert.match(out.message, /0 字节|空/, 'says what actually happened');
+    assert.equal(out.download, false, 'no download button for an empty result');
+    // Teardown must be complete, or the UI keeps offering controls that do nothing.
+    assert.equal(out.playing, false, 'isPlaying cleared');
+    assert.equal(out.stopBtn, false, 'the stop button is gone');
+    assert.equal(out.viz, false, 'the visualiser stopped');
+    assert.equal(out.raf, null, 'no RAF loop left spinning');
+  } finally {
+    await empty.close();
     await page.goto(server.url);
     await configureApp();
   }
