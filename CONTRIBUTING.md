@@ -56,6 +56,16 @@ Killing a test script with `timeout` or Ctrl-C skips its `finally { chrome.close
 instances accumulate — 248 of them once, which is what made an earlier flake look like a
 product bug. `launchChrome()` warns when it sees more than 20.
 
+The browser tests are **hermetic**: the harness serves Vue from `test/.cache/` and rewrites
+the UI's CDN `<script>` to a local route. That cache is populated on the first networked run
+and gitignored. Before this, every browser test implicitly depended on the browser reaching
+unpkg.com — when it could not, `page.goto` timed out or the page came up with no
+`window.Vue` and zero voices, which reads as "the app is broken". Measured once: node-side
+`curl` to unpkg returned 200 three times while headless Chrome could not fetch it at all.
+That was the other half of the flake described above; leaked Chrome processes were the first
+half. If you ever see `unpkg.com` in the served HTML during a test, the rewrite failed and
+the harness throws rather than quietly restoring the dependency.
+
 ## Pull requests
 
 1. Branch from `main` (`feat/…`, `fix/…`, `docs/…`).

@@ -119,9 +119,17 @@ voice = `x"><prosody rate="-100%">INJECTED</prosody></voice><voice name="y`
 
 ## P1 — 建议下一步
 
-### 3. 前端 API key 存储
-key 明文存 `localStorage`，任何 XSS 或同源脚本可读。当前无 `v-html`，XSS 面较小，但建议：
-- 要么改为后端会话（同源 cookie + 服务端持有 key）
+### 3. 前端 API key 存储 · 供应链面已收口（2026-08-05）
+key 明文存 `localStorage`，任何 XSS 或同源脚本可读。
+
+**已做**：实测 UI 里 `v-html` / `innerHTML=` / `eval` 各为 0，自身 XSS 面确实很小；
+但当时 Vue 是从 `unpkg.com/vue@3` 加载的**浮动版本、无 SRI**（unpkg 只缓存 60s，实测解析到
+3.5.40），那个脚本能读到这个 key —— CDN 一旦被污染 key 就随之泄漏。现已固定到 3.5.40 +
+sha384 SRI + crossorigin，线上验证 SRI 生效且页面正常（322 音色）。
+
+**仍未做**（需要产品决策，不是纯技术问题）：
+- 要么改为后端会话（同源 cookie + 服务端持有 key）—— 但这与「开放访问、任何人可自部署」
+  的定位有张力
 - 要么明确文档化「此 UI 仅供受信任环境使用」
 
 ### 4. 请求体大小上限 ✅ 已完成
