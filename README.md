@@ -196,9 +196,15 @@ chunks of `chunk_size` and each chunk costs one upstream subrequest, while Cloud
 allows 50 per invocation. The Worker therefore refuses more than 45 chunks with 413
 `too_many_chunks`, which at the default `chunk_size` of 300 is about 13500 characters.
 
-To synthesise longer text, raise `chunk_size` (up to 2000, so ~90000 characters worth of
-chunks) or split the text across requests. Coarser chunks mean fewer, longer upstream
-calls — slightly slower to first byte, but far more headroom.
+To synthesise longer text, raise `chunk_size` or split the text across requests. Coarser
+chunks mean fewer, longer upstream calls — slightly slower to first byte, but far more
+headroom.
+
+**The two limits are in series, so the real ceiling is whichever binds first.** At
+`chunk_size` 2000 the chunk budget would allow 45 × 2000 = 90000 characters, but
+`MAX_INPUT_CHARS` is checked first, so 50000 is the hard maximum — verified live: 50000
+characters at `chunk_size` 2000 returns audio, 50001 returns 400 `input_too_long`. Raising
+`chunk_size` buys headroom up to 50000, not beyond it.
 
 The check runs before any response byte is written, deliberately: a streaming request that
 exceeded the platform budget mid-flight used to end as HTTP 200 with a well-formed EOF, so

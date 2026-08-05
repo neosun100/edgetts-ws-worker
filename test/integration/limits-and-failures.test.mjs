@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import worker, { __test__ } from '../../src/worker.js';
+import { readFileSync } from 'node:fs';
 import { installMockFetch, speechRequest, req } from '../helpers/mock-upstream.mjs';
 
 const ANON = { ALLOW_ANONYMOUS: 'true' };
@@ -492,4 +493,77 @@ test('a request just inside the limit on the slow path still succeeds', async ()
     assert.equal(res.status, 200);
     assert.equal(mock.calls.synth, actual, 'one upstream call per chunk');
   });
+});
+
+test('the character limit and the chunk limit are in series, and docs must say which binds', async () => {
+  // Documentation defect found by auditing README numbers against the code: it claimed
+  // chunk_size 2000 handles "~90000 characters" (45 x 2000), but MAX_INPUT_CHARS is checked
+  // BEFORE chunking, so 50001 is rejected with input_too_long. A caller planning for 90000
+  // hits a wall at 50001 with an error code that has nothing to do with chunk_size —
+  // completely the wrong debugging direction.
+  const { MAX_INPUT_CHARS, MAX_CHUNKS, MAX_CHUNK_SIZE } = __test__.LIMITS;
+
+  // The chunk budget is the larger of the two here; that is exactly why the interaction is
+  // easy to get wrong when documenting it.
+  assert.ok(
+    MAX_CHUNKS * MAX_CHUNK_SIZE > MAX_INPUT_CHARS,
+    'premise: the chunk budget exceeds the character cap, so the character cap binds'
+  );
+
+  await withMock({}, async (mock) => {
+    // Exactly at the character cap, with a chunk_size that keeps it well inside MAX_CHUNKS.
+    const atCap = 'a'.repeat(MAX_INPUT_CHARS);
+    const ok = await worker.fetch(
+      speechRequest({ input: atCap, voice: 'en-US-AvaNeural', chunk_size: MAX_CHUNK_SIZE }),
+      ANON,
+      {}
+    );
+    assert.equal(ok.status, 200, MAX_INPUT_CHARS + ' characters must be accepted');
+    assert.ok(mock.calls.synth > 1, 'and it really was chunked');
+  });
+
+  await withMock({}, async (mock) => {
+    // One character over: rejected by the character cap, NOT by the chunk cap.
+    const overCap = 'a'.repeat(MAX_INPUT_CHARS + 1);
+    const res = await worker.fetch(
+      speechRequest({ input: overCap, voice: 'en-US-AvaNeural', chunk_size: MAX_CHUNK_SIZE }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 400);
+    assert.equal(
+      (await res.json()).error.code,
+      'input_too_long',
+      'the character cap must be what rejects it, so the error names the right cause'
+    );
+    assert.equal(mock.calls.synth, 0);
+  });
+});
+
+test('README never presents the chunk-budget product as a reachable capability', () => {
+  // Guards the doc itself: the previous wording said chunk_size 2000 handles "~90000
+  // characters" (45 x 2000), a figure MAX_INPUT_CHARS makes unreachable.
+  //
+  // A first version of this test only asked whether MAX_INPUT_CHARS appeared *somewhere* in
+  // the file — and it passed against the reverted wording, because 50000 also appears in an
+  // unrelated paragraph. Checking file-wide presence proves nothing. The property that
+  // matters is local: wherever the chunk-budget product appears, the binding cap must appear
+  // in the same paragraph, so a reader cannot take the big number as the limit.
+  const { MAX_INPUT_CHARS, MAX_CHUNKS, MAX_CHUNK_SIZE } = __test__.LIMITS;
+  const chunkBudget = String(MAX_CHUNKS * MAX_CHUNK_SIZE);
+  const realCap = String(MAX_INPUT_CHARS);
+
+  for (const file of ['README.md', 'README_CN.md']) {
+    const text = readFileSync(new URL('../../' + file, import.meta.url), 'utf8');
+    // Paragraphs are blank-line separated in both files.
+    for (const para of text.split(/\n\s*\n/)) {
+      if (!para.includes(chunkBudget)) continue;
+      assert.ok(
+        para.includes(realCap),
+        file +
+          ': a paragraph mentions the chunk budget ' + chunkBudget +
+          ' without the binding cap ' + realCap + ' beside it:\n' + para.trim().slice(0, 200)
+      );
+    }
+  }
 });
