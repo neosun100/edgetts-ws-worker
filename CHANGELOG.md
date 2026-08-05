@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.17.0] - 2026-08-05
+
+从 ROADMAP 的 P1-3(前端 API key 存储)入手,顺带**找到了折腾我好几轮的间歇性 e2e 失败的另一半根因**。
+
+### Security
+- **Vue 固定版本 + SRI**。此前是 `unpkg.com/vue@3` —— 浮动大版本、无完整性校验,而 unpkg
+  对那个重定向只缓存 60s,所以页面会静默采用新发布的任意 Vue(实测当时解析到 3.5.40)。
+  这个脚本**能读到 UI 明文存在 localStorage 里的 API key**,CDN 一旦被污染 key 就随之泄漏。
+  现固定到 3.5.40 + sha384 integrity + crossorigin(SRI 生效的前置要求)+ referrerpolicy,
+  升级命令写在旁边的注释里。线上实测:SRI 生效且页面正常(322 音色全部渲染)。
+  顺带核实 UI 自身 XSS 面:`v-html` / `innerHTML=` / `eval` 各为 0。
+
+### Fixed — 间歇性 e2e 失败的另一半根因
+- **浏览器测试此前隐含依赖外网**。UI 用 `<script src="https://unpkg.com/...">` 加载 Vue,
+  于是每个浏览器测试都要求**浏览器**能连上 unpkg。连不上时 `page.goto` 在
+  readyState=complete 上超时(报 "page load timeout"),或者页面起来了但 `window.Vue`
+  不存在、DOM 里 0 个 `.voice-item` —— 症状读起来就是「应用坏了」。
+  实测同一时刻:node 侧 `curl` unpkg 三次都是 200,而 headless Chrome 完全取不到。
+  我此前把这个 flake 归因于泄漏的 Chrome 进程。**那个泄漏是真的、也该修**,但它只是一半;
+  这是另一半 —— 同一个症状有两个独立成因,只修一个就会继续偶发。
+  harness 现在从 `test/.cache/` 本地供给 Vue(首次联网时下载,已 gitignore),并把 CDN 标签
+  重写成 `/vendor/` 本地路由;重写一旦没生效就**直接抛错**,静默漏掉等于悄悄恢复外网依赖。
+
+### 记录两处我自己的错判
+- 我先从「Vue 没加载」推出「SRI 阻止了合法脚本」并写进了输出。**去掉 SRI 后同样加载不出来**
+  —— 一个对照实验就能否掉的结论,我却先下了判断。
+- 重写用的正则从任意 `<script` 起匹配,于是撞上页面里别的 script 标签、把中间大段内容一起
+  吞掉;它还被我自己写在注释里的那条 unpkg 示例 URL 干扰。已收窄到
+  `<script src="https://unpkg.com`,注释里的 URL 改成 `<CDN>` 占位。
+
+### 测试
+- 新增 BUG#11(线上 Vue 必须固定版本 + 带 SRI)与 BUG#11b(harness 必须本地供给 Vue,
+  且 `/vendor/` 路由真的返回可用的 Vue bundle)。
+- 282 项(265 fast + 17 e2e)全部通过。
+
 ## [2.16.0] - 2026-08-05
 
 补完最后一个从未审过的角度:error-and-observability(它的 agent 连续三轮都因凭证失败挂掉)。
