@@ -605,3 +605,169 @@ test('a string custom_keywords still works, and omitting it is fine', async () =
     mock.restore();
   }
 });
+
+// --------------------------------------------------- type strictness on booleans/objects
+// Both of these were silent: the wrong type did not error, it changed behaviour.
+
+test("'stream' must be a boolean — a truthy string is not streaming", async () => {
+  // `stream: "false"` used to enable streaming, the opposite of what the caller wrote,
+  // because the check was a truthiness test. Combined with wav/opus that was the entry
+  // point to silent truncation.
+  for (const bad of ['false', 'no', 0, 1, {}, []]) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const res = await worker.fetch(
+        speechRequest({ input: 'hi', voice: 'en-US-AvaNeural', stream: bad }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 400, JSON.stringify(bad) + ' must be rejected');
+      const json = await res.json();
+      assert.equal(json.error.code, 'invalid_stream');
+      assert.match(json.error.message, new RegExp(typeof bad), 'names the type received');
+      assert.equal(mock.calls.synth, 0, 'never reached upstream');
+    } finally {
+      mock.restore();
+    }
+  }
+});
+
+test("both real booleans for 'stream' still work", async () => {
+  for (const value of [true, false]) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const res = await worker.fetch(
+        speechRequest({ input: 'hi', voice: 'en-US-AvaNeural', stream: value }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 200, 'stream: ' + value + ' is valid');
+      if (value) { try { await res.arrayBuffer(); } catch { /* drain */ } }
+    } finally {
+      mock.restore();
+    }
+  }
+});
+
+test("'cleaning_options' must be an object, not a string or array", async () => {
+  // Spreading a string produced {0:'a',1:'b',...}, so every cleaning flag silently fell
+  // back to its default — a caller who passed "remove_markdown" to disable it got the
+  // opposite and no indication why.
+  for (const bad of ['remove_markdown', ['remove_markdown'], 42, true]) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch();
+    try {
+      const res = await worker.fetch(
+        speechRequest({ input: 'hi', voice: 'en-US-AvaNeural', cleaning_options: bad }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 400, JSON.stringify(bad) + ' must be rejected');
+      assert.equal((await res.json()).error.code, 'invalid_cleaning_options');
+      assert.equal(mock.calls.synth, 0);
+    } finally {
+      mock.restore();
+    }
+  }
+});
+
+// ------------------------------------------------------------- upstream 4xx is a 400
+test('an upstream 4xx becomes a 400, not a 500', async () => {
+  // A voice that passes VOICE_RE but does not exist upstream returned 500
+  // tts_generation_error, sending the caller to check our service status when the fix is to
+  // pick a different voice. Upstream 5xx must still be a 500.
+  __test__.resetTokenCache();
+  const mock = installMockFetch({ synth: () => ({ status: 400, body: 'voice not found' }) });
+  try {
+    const res = await worker.fetch(
+      speechRequest({ input: 'hi', voice: 'xx-YY-FakeNeural' }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 400);
+    const json = await res.json();
+    assert.equal(json.error.code, 'upstream_rejected_request');
+    assert.match(json.error.message, /voice/, 'points at the likely cause');
+    assert.match(json.error.message, /v1\/models/, 'tells the caller where valid ids are');
+    // The upstream body must still not leak.
+    assert.ok(!json.error.message.includes('voice not found'), 'upstream text stays in the log');
+    assert.ok(mock.logs.some((l) => l.msg.includes('voice not found')), 'but it IS logged');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('an upstream 5xx is still a 500', async () => {
+  __test__.resetTokenCache();
+  const mock = installMockFetch({ synth: () => ({ status: 503, body: 'upstream down' }) });
+  try {
+    const res = await worker.fetch(
+      speechRequest({ input: 'hi', voice: 'en-US-AvaNeural' }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 500, 'a real upstream outage is our problem to report');
+    assert.equal((await res.json()).error.code, 'tts_generation_error');
+  } finally {
+    mock.restore();
+  }
+});
+
+// ------------------------------------------------------------ read-only endpoints
+test('the model endpoints reject write methods with 405 and an Allow header', async () => {
+  // They used to answer PUT/DELETE/PATCH with 200 and the full list, so a caller could
+  // believe a write had succeeded. RFC 9110 requires Allow on a 405.
+  for (const path of ['/v1/models', '/v1/models/public']) {
+    for (const method of ['PUT', 'DELETE', 'PATCH', 'POST']) {
+      __test__.resetTokenCache();
+      __test__.resetVoicesCache();
+      const mock = installMockFetch();
+      try {
+        const res = await worker.fetch(
+          new Request('https://tts.test' + path, { method }),
+          ANON,
+          {}
+        );
+        assert.equal(res.status, 405, method + ' ' + path + ' must be rejected');
+        assert.equal(res.headers.get('Allow'), 'GET, HEAD, OPTIONS', 'Allow header present');
+        assert.equal((await res.json()).error.code, 'method_not_allowed');
+      } finally {
+        mock.restore();
+      }
+    }
+  }
+});
+
+test('GET and HEAD still work on both model endpoints', async () => {
+  for (const path of ['/v1/models', '/v1/models/public']) {
+    for (const method of ['GET', 'HEAD']) {
+      __test__.resetTokenCache();
+      __test__.resetVoicesCache();
+      const mock = installMockFetch();
+      try {
+        const res = await worker.fetch(new Request('https://tts.test' + path, { method }), ANON, {});
+        assert.equal(res.status, 200, method + ' ' + path + ' must still work');
+      } finally {
+        mock.restore();
+      }
+    }
+  }
+});
+
+test('POST /v1/audio/speech rejects other methods with Allow: POST', async () => {
+  __test__.resetTokenCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      new Request('https://tts.test/v1/audio/speech', { method: 'GET' }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 405);
+    assert.equal(res.headers.get('Allow'), 'POST, OPTIONS');
+  } finally {
+    mock.restore();
+  }
+});

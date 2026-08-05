@@ -163,7 +163,12 @@ test('a 400 from upstream is not retried (caller error, retry cannot help)', asy
       ANON,
       {}
     );
-    assert.equal(res.status, 500);
+    // The subject of this test is the retry count. The status was 500 when it was written
+    // and is now 400 — an upstream 4xx is the caller's error, not ours (see
+    // validation.test.mjs "an upstream 4xx becomes a 400"). Assert the status too so the
+    // two files cannot drift apart.
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error.code, 'upstream_rejected_request');
     assert.equal(mock.calls.synth, 1, 'exactly one attempt for a non-retryable 4xx');
   });
 });

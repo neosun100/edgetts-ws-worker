@@ -145,7 +145,9 @@ function handleOptions(request) {
 }
 async function handleSpeechRequest(request) {
   if (request.method !== "POST") {
-    return errorResponse("不允许的方法", 405, "method_not_allowed");
+    return errorResponse("不允许的方法", 405, "method_not_allowed", "api_error", {
+      "Allow": "POST, OPTIONS"
+    });
   }
   // 先看 Content-Length 再读 body：await request.json() 会把整个 body 收进内存后
   // 才轮到下面的 input 长度校验，等于「先受伤再检查」。一个 input 合法、但塞了
@@ -209,6 +211,30 @@ async function handleSpeechRequest(request) {
     cleaning_options = {}
     // 文本清理选项
   } = requestBody;
+  // stream 只接受布尔。之前是真值判断，于是 stream: "false" / "no" / [] 全都进流式 ——
+  // 字符串 "false" 得到的行为与字面意思相反，而与 wav/opus 叠加时那正是静默截断的入口。
+  if (stream !== undefined && typeof stream !== "boolean") {
+    return errorResponse(
+      `'stream' 必须是布尔值，收到 ${typeof stream}` +
+        (typeof stream === "string" ? `（${JSON.stringify(stream)}）` : "") +
+        "。JSON 里请写 true / false，不要加引号。",
+      400,
+      "invalid_stream"
+    );
+  }
+  // 修:cleaning_options 必须是对象。传字符串/数组/数字时展开成 {...'abc'} 得到的是
+  // {0:"a",1:"b",...}，于是所有清理选项静默退回默认值，调用方以为自己关掉了某项。
+  if (
+    cleaning_options !== undefined &&
+    (typeof cleaning_options !== "object" || cleaning_options === null || Array.isArray(cleaning_options))
+  ) {
+    return errorResponse(
+      `'cleaning_options' 必须是对象，收到 ${Array.isArray(cleaning_options) ? "array" : typeof cleaning_options}。` +
+        "例如 {\"remove_markdown\": false}。",
+      400,
+      "invalid_cleaning_options"
+    );
+  }
   const finalCleaningOptions = {
     remove_markdown: true,
     // 移除 Markdown
@@ -454,6 +480,17 @@ async function getModels() {
   }
 }
 
+/**
+ * 语音列表是只读的，但之前对 PUT/DELETE/PATCH 一律返回 200 + 完整列表 —— 调用方会以为
+ * 自己的写操作成功了。405 必须带 Allow 头（RFC 9110 要求），否则客户端无从知道该用什么方法。
+ */
+function modelsMethodCheck(request) {
+  if (request.method === "GET" || request.method === "HEAD") return null;
+  return errorResponse("不允许的方法，语音列表是只读的", 405, "method_not_allowed", "api_error", {
+    "Allow": "GET, HEAD, OPTIONS"
+  });
+}
+
 function modelsHeaders() {
   return {
     "Content-Type": "application/json",
@@ -483,6 +520,8 @@ function filterModels(models, url) {
 }
 
 async function handlePublicModelsRequest(request) {
+  const wrongMethod = modelsMethodCheck(request);
+  if (wrongMethod) return wrongMethod;
   try {
     const models = await getModels();
     return new Response(JSON.stringify(filterModels(models, new URL(request.url))), {
@@ -494,6 +533,8 @@ async function handlePublicModelsRequest(request) {
   }
 }
 async function handleModelsRequest(request) {
+  const wrongMethod = modelsMethodCheck(request);
+  if (wrongMethod) return wrongMethod;
   try {
     const models = await getModels();
     return new Response(JSON.stringify(filterModels(models, new URL(request.url))), {
@@ -814,6 +855,17 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
     // 完整错误(含堆栈)只进日志；回给调用方的是我们自己的措辞 + 机器码，
     // 避免任何内部实现细节(上游原文、路径、依赖名)顺着 message 泄漏出去。
     console.error("非流式 TTS 失败:", error);
+    // 上游的 4xx 是**调用方**的错误，不该报成 500。最常见的情形是 voice 形状合法
+    // （通得过 VOICE_RE）但上游没有这个音色 —— 报 500 会让调用方去查我们的服务状态，
+    // 而真正该做的是换一个音色。上游原文仍然只进日志，不进响应（见 getAudioChunk）。
+    if (error?.status >= 400 && error.status < 500) {
+      return errorResponse(
+        `上游拒绝了该请求（${error.status}）。最常见的原因是 voice 不存在 —— ` +
+          "请用 GET /v1/models 里的 id；也可能是 style 不被该音色支持。",
+        400,
+        "upstream_rejected_request"
+      );
+    }
     return errorResponse("语音合成失败，请稍后重试", 500, "tts_generation_error");
   }
 }
@@ -1104,14 +1156,16 @@ function cleanText(text, options) {
   }
   return cleanedText.trim();
 }
-function errorResponse(message, status, code, type = "api_error") {
+// extraHeaders 供个别状态码补必需的响应头（如 405 的 Allow，RFC 9110 要求）。
+// 放在最后一个参数是为了不动既有的 (message, status, code) 三参调用点。
+function errorResponse(message, status, code, type = "api_error", extraHeaders = null) {
   return new Response(
     JSON.stringify({
       error: { message, type, param: null, code }
     }),
     {
       status,
-      headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+      headers: { "Content-Type": "application/json", ...makeCORSHeaders(), ...(extraHeaders || {}) }
     }
   );
 }
