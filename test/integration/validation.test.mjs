@@ -35,7 +35,13 @@ async function expectReject(body, status, code, mock) {
   const json = await res.json();
   assert.equal(json.error.code, code, `error.code for ${JSON.stringify(body).slice(0, 120)}`);
   assert.equal(json.error.type, 'api_error');
-  assert.equal(json.error.param, null);
+  // param 曾恒为 null，那时这条断言钉的是占位值而非契约。现在它会指出出错的字段
+  // （见 error-disclosure.test.mjs），所以这里改为断言**形状**：要么是 null，要么是一个
+  // 非空字符串。钉具体值属于那个文件的职责，这里只保证不会漏出 undefined 之类。
+  assert.ok(
+    json.error.param === null || (typeof json.error.param === "string" && json.error.param.length > 0),
+    "error.param must be null or a non-empty string, got " + JSON.stringify(json.error.param)
+  );
   assert.equal(typeof json.error.message, 'string');
   assert.ok(json.error.message.length > 0, 'error.message is non-empty');
   if (mock) {

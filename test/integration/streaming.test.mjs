@@ -276,7 +276,9 @@ test('a transient 500 from upstream is retried and the stream stays byte-exact',
     assert.equal(mock.calls.synth, 2, 'one failed attempt + one successful retry');
     const warned = mock.logs.filter((l) => l.level === 'warn' && l.msg.includes('重试中'));
     assert.equal(warned.length, 1, 'retry is logged, not silent');
-    assert.match(warned[0].msg, /分块合成第 1 次失败（500）/);
+    // 日志现在带分块序号（#1/1）：并发重试时「第 2 次失败」出现两次曾看起来像计数 bug，
+    // 实际是两个不同分块各自的第二次尝试，运维分不清「某块反复失败」和「所有块都在失败」。
+    assert.match(warned[0].msg, /分块#\d+\/\d+合成第 1 次失败（500）/);
   } finally {
     mock.restore();
   }

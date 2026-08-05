@@ -98,3 +98,233 @@ test('validation errors still include the actual vs allowed values (deliberately
     assert.match(json.error.message, /0\.25|4/, 'tells the caller the allowed range');
   });
 });
+
+// ------------------------------------------------------------ error.param
+// The response shape has always carried `param` (OpenAI uses it to name the offending
+// field) but all 26 error sites hardcoded null. Two codes each serve two different causes —
+// invalid_request_error covers "body is not JSON" and "input field missing", and
+// invalid_cleaning_options covers "the container is the wrong type" and
+// "custom_keywords is the wrong type" — so a caller branching on `code` alone cannot tell
+// which field to fix. Renaming the codes would break existing callers (and the tests that
+// pin them); populating `param` is purely additive.
+
+test('error.param names the offending field', async () => {
+  const cases = [
+    [{ input: 'hi', voice: 'en-US-AvaNeural', speed: 99 }, 'invalid_speed', 'speed'],
+    [{ input: 'hi', voice: '!!!' }, 'invalid_voice', 'voice'],
+    [{ input: 'hi', voice: 'en-US-AvaNeural', pitch: 9 }, 'invalid_pitch', 'pitch'],
+    [{ input: 'hi', voice: 'en-US-AvaNeural', stream: 'false' }, 'invalid_stream', 'stream'],
+    [
+      { input: 'hi', voice: 'en-US-AvaNeural', response_format: 'aac' },
+      'invalid_response_format',
+      'response_format',
+    ],
+  ];
+  for (const [body, code, param] of cases) {
+    await withMock({}, async () => {
+      const res = await worker.fetch(speechRequest(body), ANON, {});
+      const json = await res.json();
+      assert.equal(json.error.code, code, JSON.stringify(body));
+      assert.equal(json.error.param, param, code + ' must name its field');
+    });
+  }
+});
+
+test('param disambiguates the two codes that serve two causes each', async () => {
+  // This is the whole point: same code, different param, so a caller can act on it.
+  await withMock({}, async () => {
+    const malformed = await worker.fetch(
+      new Request('https://tts.test/v1/audio/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{not json',
+      }),
+      ANON,
+      {}
+    );
+    const a = await malformed.json();
+    assert.equal(a.error.code, 'invalid_request_error');
+    assert.equal(a.error.param, 'body', 'a malformed body points at the body');
+  });
+
+  await withMock({}, async () => {
+    const missing = await worker.fetch(speechRequest({ voice: 'en-US-AvaNeural' }), ANON, {});
+    const b = await missing.json();
+    assert.equal(b.error.code, 'invalid_request_error', 'same code as above');
+    assert.equal(b.error.param, 'input', 'but param distinguishes the cause');
+  });
+
+  await withMock({}, async () => {
+    const container = await worker.fetch(
+      speechRequest({ input: 'hi', voice: 'en-US-AvaNeural', cleaning_options: 'x' }),
+      ANON,
+      {}
+    );
+    const c = await container.json();
+    assert.equal(c.error.code, 'invalid_cleaning_options');
+    assert.equal(c.error.param, 'cleaning_options');
+  });
+
+  await withMock({}, async () => {
+    const field = await worker.fetch(
+      speechRequest({
+        input: 'hi',
+        voice: 'en-US-AvaNeural',
+        cleaning_options: { custom_keywords: 1 },
+      }),
+      ANON,
+      {}
+    );
+    const d = await field.json();
+    assert.equal(d.error.code, 'invalid_cleaning_options', 'same code');
+    assert.equal(
+      d.error.param,
+      'cleaning_options.custom_keywords',
+      'param points at the nested field, not just the container'
+    );
+  });
+});
+
+test('errors with no corresponding request field leave param null', async () => {
+  // Inventing a param for an internal failure would be worse than admitting there is none.
+  await withMock({}, async () => {
+    const res = await worker.fetch(req('/nope'), ANON, {});
+    const json = await res.json();
+    assert.equal(json.error.code, 'not_found');
+    assert.equal(json.error.param, null);
+  });
+});
+
+// -------------------------------------------------------------- log diagnosability
+test('a chunk failure is attributable to a specific chunk and format', async () => {
+  // Without the chunk label, concurrent retries produced "分块合成第 2 次失败" twice, which
+  // reads like a broken counter but is actually two different chunks each on their second
+  // attempt. An operator cannot tell "one chunk keeps failing" (bad text) from "every chunk
+  // is failing" (upstream throttling) — and those call for different responses.
+  __test__.resetTokenCache();
+  __test__.resetVoicesCache();
+  const mock = installMockFetch({
+    synth: ({ index }) =>
+      index === 1 ? { status: 429, body: 'rate limited' } : { status: 200, body: Buffer.alloc(64) },
+  });
+  try {
+    await worker.fetch(
+      speechRequest({
+        input: '这是一句测试文本。'.repeat(20),
+        voice: 'zh-CN-XiaoxiaoNeural',
+        response_format: 'wav',
+        chunk_size: 100,
+      }),
+      ANON,
+      {}
+    );
+    const logged = mock.logs.map((l) => l.msg).join('\n');
+    assert.match(logged, /#\d+\/\d+/, 'logs identify which chunk of how many');
+    assert.match(logged, /riff-24khz/, 'and the upstream output format');
+    assert.match(logged, /429/, 'and the upstream status code');
+    // The failing chunk is index 1, so its label must appear; a passing chunk must not be
+    // reported as failing.
+    assert.match(logged, /#2\/\d+/, 'the failing chunk is named');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('every degradation path leaves a trace in the log', async () => {
+  // The project's own rule: a degraded result and a healthy one must not look identical in
+  // the log. Checks the paths that silently substitute something for the real answer.
+  const checks = [];
+
+  // 1. stale voice cache when upstream is down
+  await withMock({}, async (mock) => {
+    await worker.fetch(req('/v1/models'), ANON, {});
+    __test__.expireVoicesCache();
+    const real = globalThis.fetch;
+    globalThis.fetch = async (i, init) => {
+      const u = typeof i === 'string' ? i : i.url;
+      if (u.includes('/voices/list')) return new Response('down', { status: 502 });
+      return real(i, init);
+    };
+    try {
+      await worker.fetch(req('/v1/models'), ANON, {});
+    } finally {
+      globalThis.fetch = real;
+    }
+    checks.push(['stale voice cache', mock.logs.some((l) => l.msg.includes('过期缓存'))]);
+  });
+
+  // 2. built-in fallback list on a cold cache
+  await withMock({}, async (mock) => {
+    const real = globalThis.fetch;
+    globalThis.fetch = async (i, init) => {
+      const u = typeof i === 'string' ? i : i.url;
+      if (u.includes('/voices/list')) return new Response('down', { status: 502 });
+      return real(i, init);
+    };
+    try {
+      await worker.fetch(req('/v1/models'), ANON, {});
+    } finally {
+      globalThis.fetch = real;
+    }
+    checks.push(['fallback voice list', mock.logs.some((l) => l.msg.includes('获取语音列表失败'))]);
+  });
+
+  // 3. expired token reused because the token endpoint is down
+  __test__.resetTokenCache();
+  const tokenMock = installMockFetch({ tokenExp: 120 });
+  try {
+    await worker.fetch(speechRequest({ input: 'warm', voice: 'en-US-AvaNeural' }), ANON, {});
+    const real = globalThis.fetch;
+    globalThis.fetch = async (i, init) => {
+      const u = typeof i === 'string' ? i : i.url;
+      if (u.includes('dev.microsofttranslator.com')) return new Response('down', { status: 503 });
+      return real(i, init);
+    };
+    try {
+      await worker.fetch(speechRequest({ input: 'x', voice: 'en-US-AvaNeural' }), ANON, {});
+    } finally {
+      globalThis.fetch = real;
+    }
+    checks.push([
+      'stale token',
+      tokenMock.logs.some((l) => l.msg.includes('过期的缓存 Token')),
+    ]);
+  } finally {
+    tokenMock.restore();
+  }
+
+  // 4 & 5. container merges declining and falling back to plain concatenation
+  for (const [format, needle] of [['wav', 'WAV 合并'], ['opus', 'WebM 合并']]) {
+    __test__.resetTokenCache();
+    const mock = installMockFetch({ synth: () => ({ status: 200, body: Buffer.alloc(40, 5) }) });
+    try {
+      await worker.fetch(
+        speechRequest({
+          input: '这是一句用来触发多分块的中文文本。'.repeat(12),
+          voice: 'zh-CN-XiaoxiaoNeural',
+          response_format: format,
+          chunk_size: 50,
+        }),
+        ANON,
+        {}
+      );
+      checks.push([format + ' merge fallback', mock.logs.some((l) => l.msg.includes(needle))]);
+    } finally {
+      mock.restore();
+    }
+  }
+
+  // 6. running without auth
+  __test__.resetTokenCache();
+  const anonMock = installMockFetch();
+  try {
+    await worker.fetch(speechRequest({ input: 'hi', voice: 'en-US-AvaNeural' }), ANON, {});
+    checks.push(['anonymous mode', anonMock.logs.some((l) => l.msg.includes('匿名模式'))]);
+  } finally {
+    anonMock.restore();
+  }
+
+  const silent = checks.filter(([, logged]) => !logged).map(([name]) => name);
+  assert.deepEqual(silent, [], 'these degradations happen silently: ' + silent.join(', '));
+  assert.equal(checks.length, 6, 'all six paths were exercised');
+});

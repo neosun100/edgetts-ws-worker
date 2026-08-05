@@ -175,10 +175,18 @@ async function handleSpeechRequest(request) {
     }
     requestBody = JSON.parse(raw);
   } catch {
-    return errorResponse("请求体不是合法 JSON", 400, "invalid_request_error");
+    // param 指向整个 body,而不是某个字段 —— 与下面「input 字段缺失」区分开。
+    return errorResponse("请求体不是合法 JSON", 400, "invalid_request_error", "api_error", null, "body");
   }
   if (typeof requestBody?.input !== "string" || !requestBody.input.trim()) {
-    return errorResponse("'input' 是必需参数，且必须为非空字符串", 400, "invalid_request_error");
+    return errorResponse(
+      "'input' 是必需参数，且必须为非空字符串",
+      400,
+      "invalid_request_error",
+      "api_error",
+      null,
+      "input"
+    );
   }
   if (requestBody.input.length > LIMITS.MAX_INPUT_CHARS) {
     return errorResponse(
@@ -260,7 +268,10 @@ async function handleSpeechRequest(request) {
     return errorResponse(
       `cleaning_options.custom_keywords 必须是逗号分隔的字符串，收到 ${typeof finalCleaningOptions.custom_keywords}`,
       400,
-      "invalid_cleaning_options"
+      "invalid_cleaning_options",
+      "api_error",
+      null,
+      "cleaning_options.custom_keywords"
     );
   }
   const cleanedInput = cleanText(input, finalCleaningOptions);
@@ -619,7 +630,8 @@ async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
 
   const schedule = (index) => {
     if (index >= chunks.length) return;
-    const task = getAudioChunk(chunks[index], ...ttsArgs).then((blob) => blob.arrayBuffer());
+    const task = getAudioChunk(chunks[index], ...ttsArgs, `#${index + 1}/${chunks.length}`)
+      .then((blob) => blob.arrayBuffer());
     // 必须在这里就挂上 handler，不能等主循环结束后补。unhandledRejection 的判定是
     // 时序性的：V8 在 microtask 队列排空的那一刻检查「此刻有没有 handler」，事后
     // 补 .catch() 只会换来 PromiseRejectionHandledWarning，拦不住那次上报。
@@ -930,7 +942,9 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
   try {
     for (let i = 0; i < textChunks.length; i += concurrency) {
       const batch = textChunks.slice(i, i + concurrency);
-      const audioPromises = batch.map((chunk) => getAudioChunk(chunk, ...ttsArgs));
+      const audioPromises = batch.map((chunk, j) =>
+        getAudioChunk(chunk, ...ttsArgs, `#${i + j + 1}/${textChunks.length}`)
+      );
       const audioBlobs = await Promise.all(audioPromises);
       allAudioBlobs.push(...audioBlobs);
     }
@@ -971,7 +985,7 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
 }
 var MAX_CHUNK_ATTEMPTS = 3;
 
-async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, contentType) {
+async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, contentType, label = "") {
   let lastError;
   for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
     try {
@@ -995,8 +1009,12 @@ async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, 
         // error.message 原样放进 HTTP 响应，等于把微软的错误原文(可能含订阅密钥片段、
         // 内部主机名、请求 ID)转发给任意调用方。实测泄漏过
         // "Subscription key sk-... rejected at /internal/host" 这种内容。
+        // 带上分块序号与输出格式：多分块并发重试时，光看「第 2 次失败」分不清是同一个分块
+        // 反复失败还是多个分块都在失败 —— 这两种情况的处置完全不同（前者多半是那段文本有
+        // 问题，后者是上游整体在限流）。format 则让「只有 wav 出问题」这类模式看得见。
         console.error(
-          `上游合成失败: ${response.status} ${response.statusText} - ${errorText.slice(0, 500)}`
+          `上游合成失败${label}[${outputFormat}]: ${response.status} ${response.statusText} - ` +
+            errorText.slice(0, 500)
         );
         const err = new Error(`上游语音合成失败（${response.status}）`);
         err.status = response.status;
@@ -1009,7 +1027,7 @@ async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, 
       const status = error?.status;
       const retryable = !status || status === 401 || status === 408 || status === 429 || status >= 500;
       if (!retryable || attempt === MAX_CHUNK_ATTEMPTS) throw error;
-      console.warn(`分块合成第 ${attempt} 次失败（${status ?? "network"}），重试中`);
+      console.warn(`分块${label}合成第 ${attempt} 次失败（${status ?? "network"}），重试中`);
       await new Promise((r) => setTimeout(r, 150 * attempt));
     }
   }
@@ -1256,12 +1274,44 @@ function cleanText(text, options) {
   }
   return cleanedText.trim();
 }
+/**
+ * code -> 出错的请求字段。OpenAI 的错误结构里 param 就是干这个的，而我们此前 26 个错误
+ * 出口全都硬写 `param: null`。
+ *
+ * 为什么用映射而不是给 errorResponse 加第 6 个参数：有两个 code 各自服务两种不同原因
+ * （`invalid_request_error` = body 不是 JSON / input 字段缺失；`invalid_cleaning_options`
+ * = 容器类型错 / custom_keywords 类型错），调用方光看 code 分辨不出该改哪个字段。改 code
+ * 会破坏既有调用方（测试也钉着它们），而补 param 是**纯新增**：老调用方读不到就当没有，
+ * 新调用方能精确定位。一处映射即可，26 个调用点一行都不用动。
+ *
+ * 没有对应字段的（如 internal_server_error、not_found）留空 -> 仍然是 null。
+ */
+var ERROR_PARAM = {
+  input_too_long: "input",
+  invalid_voice: "voice",
+  invalid_speed: "speed",
+  invalid_pitch: "pitch",
+  invalid_style: "style",
+  invalid_response_format: "response_format",
+  invalid_stream: "stream",
+  invalid_cleaning_options: "cleaning_options",
+  input_empty_after_cleaning: "input",
+  too_many_chunks: "chunk_size",
+  stream_format_not_chunkable: "response_format",
+  opus_requires_single_chunk: "response_format",
+  payload_too_large: "input",
+  invalid_api_key: "Authorization",
+  upstream_rejected_request: "voice",
+};
+
 // extraHeaders 供个别状态码补必需的响应头（如 405 的 Allow，RFC 9110 要求）。
 // 放在最后一个参数是为了不动既有的 (message, status, code) 三参调用点。
-function errorResponse(message, status, code, type = "api_error", extraHeaders = null) {
+function errorResponse(message, status, code, type = "api_error", extraHeaders = null, param = undefined) {
   return new Response(
     JSON.stringify({
-      error: { message, type, param: null, code }
+      // 显式传入的 param 优先：ERROR_PARAM 是按 code 查的，而有两个 code 各服务两种原因
+      // （见上），那时只有调用点自己知道是哪个字段。
+      error: { message, type, param: param ?? ERROR_PARAM[code] ?? null, code }
     }),
     {
       status,
