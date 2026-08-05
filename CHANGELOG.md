@@ -1,5 +1,56 @@
 # Changelog
 
+## [2.14.0] - 2026-08-05
+
+本轮最有价值的产出不是新功能，而是**定位到一个我自己造成的、追了五轮的假故障**。
+
+### Added
+- **合并后的 opus 带上顶层 `Duration`**。此前 Segment 是 UNKNOWN-size 且上游不声明时长，
+  `<audio>.duration` 在 `loadedmetadata` 时是 `null` —— 原生进度条一片空白，要等用户拖过
+  末尾浏览器才解析出时长。注入代价 **11 字节 / 0.18ms**，实测 Chrome 里 duration 与 seekable
+  在 `loadedmetadata` 时就是 28.35（此前 null），直接拖到 20s 落在 20.00，ffprobe 从 N/A
+  变成 28.350000 且零告警。线上 4 分块请求实测 `duration = 191.7`，拖到 150s 落在 150.00。
+
+  之前有审计说这是「11 字节、0.25ms」，但漏了最关键的一步：**Info 的 size 是已知长度**，
+  加字节必须改写它。之所以仍然便宜，是因为上游把所有 size 都编成 8 字节 vint
+  （实测 `01 00 00 00 00 00 00 56` = 86），可表示到 2^56-1，86 → 97 只改值字节、
+  编码宽度不变，后续字节一个都不用移动。换成别的编码宽度就放弃注入而不是冒险改写 ——
+  用手工构造的 1 字节 size fixture 做了断言。
+
+### Performance
+- **语音列表变得可复用**。此前 `Cache-Control: public, max-age=21600` 但没有任何 validator，
+  而且 `created` 用的是 `Date.now()`：线上连打三次都没有 `cf-cache-status`，两次的 created
+  分别是 ...556724 和 ...519071。322 条每条都变 → 响应体逐字节不同 → 下游无从复用。
+  （Brotli 本来就由 CF 加，压缩不是缺口。）
+  `created` 改为固定值（OpenAI 语义是「模型创建时间」而非「响应构造时间」），两个端点都给
+  弱 ETag 并支持 `If-None-Match` → 304。线上实测：带 validator 下载 **0 字节**，不带 50407 字节。
+  ETag 在**过滤之后**计算：`?multilingual=true` 与不带参数是两个不同的表示，共用 validator
+  会让条件请求拿到 304 并复用错内容 —— 那是正确性 bug，不只是缓存未命中。方法检查也必须在
+  条件请求检查之前，否则带 `If-None-Match` 的 PUT 会得到 304 而不是 405。两条都有断言。
+
+### Fixed — 一个我自己造成的假故障
+之前有条 e2e 约三次一失败，报「没有 buffer 被排入」，看起来像截断回归。我为此排除了五个假设
+（导航模式 4 变体、冷启动、`closeAllConnections` 开关、导航打断 fetch —— 后者报的是
+AbortError 而非 "Failed to fetch"），全部不成立，最后加了重试凑过去。
+
+真正的原因是**我的探针脚本泄漏了 248 个 headless Chrome**：用 `timeout` 掐掉脚本时，
+`finally { chrome.close() }` 根本没机会跑。这些进程抢端口与 CPU，导致 `page.goto` 超时、
+fetch 偶发失败。这也解释了为什么「单独跑就好、全量跑才偶发」（泄漏要累积）以及为什么所有
+文件内部的假设都排除不出来 —— 问题在**测试环境**，不在被测代码。
+
+清掉泄漏后连跑两次全量皆 0 失败，于是**撤掉了那个重试** —— 留着它会掩盖将来真正的失败。
+`launchChrome()` 现在在残留超过 20 个时警告一次并给出清理命令；它**不自动杀进程**，
+误杀用户自己的浏览器比留个警告糟得多（把阈值临时降到 0 验证过警告路径真的会打印）。
+
+### Changed
+- `npm test` 拆成 `test:fast`（unit/integration/regression，并行）+ `test:e2e`（串行）。
+  e2e 要驱动真实 Chrome 与多个 HTTP server，与另外 8 个测试文件并行时会因资源竞争出现
+  `page load timeout`：实测全并行 27 失败，`--test-concurrency=1` 则 0 失败。
+  CONTRIBUTING 补了这条以及「先查残留 Chrome」的排查步骤。
+
+### 测试
+273 项（258 fast + 15 e2e），全部通过。`src/worker.js` 覆盖率 **99.47% 行 / 98.19% 分支**。
+
 ## [2.13.0] - 2026-08-05
 
 第二轮审计的剩余发现，全部先复现再修。主题是**「看起来成功」比失败更危险**。

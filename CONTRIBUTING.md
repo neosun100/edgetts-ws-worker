@@ -19,7 +19,9 @@ legacy/            old NDJSON+WordBoundary variant (see ROADMAP)
 No dependencies to install. Everything runs on a recent Node (≥ 20).
 
 ```bash
-npm test            # all tests (unit + integration + regression)
+npm test            # everything: test:fast then test:e2e
+npm run test:fast   # unit + integration + regression (parallel)
+npm run test:e2e    # browser + network e2e (serial — see below)
 npm run test:unit   # one layer
 npm run coverage    # with line coverage
 npm run build       # produce dist/worker.js
@@ -36,6 +38,23 @@ E2E tests come in two kinds:
 
 Note the zero-dependency rule: the browser tests use Node's built-in `WebSocket` and a
 ~100-line CDP client rather than Playwright, so `npm install` stays a no-op.
+
+The e2e suite runs **serially and after** the fast tests, and this matters. It drives a real
+Chrome plus several HTTP servers; running it alongside eight other test files caused
+`page load timeout` failures from resource contention (measured: 27 failures in a fully
+parallel run, 0 with `--test-concurrency=1`).
+
+If you see intermittent `page load timeout` or "Failed to fetch" in the browser tests, check
+for leaked Chrome processes first:
+
+```bash
+pgrep -f edgetts-cdp- | wc -l     # should be 0 between runs
+pkill -f edgetts-cdp-             # only touches this suite's browsers
+```
+
+Killing a test script with `timeout` or Ctrl-C skips its `finally { chrome.close() }`, so
+instances accumulate — 248 of them once, which is what made an earlier flake look like a
+product bug. `launchChrome()` warns when it sees more than 20.
 
 ## Pull requests
 
