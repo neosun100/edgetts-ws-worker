@@ -126,17 +126,20 @@ test('the hardened underscore regex still spares snake_case', () => {
   }
 });
 
-// ---------------------------------------------------------------- CPU budget
+// ------------------------------------------------------- per-request CPU scaling
 // The README claimed "CPU work per request is < 1 ms". Auditing it found that no longer
 // true: chunking a 50000-character input alone measures ~1.6 ms, and the whole worst-case
-// path (clean + chunk + per-chunk SSML) is ~1.96 ms median. The claim was written before
-// chunking, WAV/WebM merging and ETag hashing existed, and nothing was watching it.
+// path (clean + chunk + per-chunk SSML) is ~1.96 ms median on a dev laptop. The claim was
+// written before chunking, WAV/WebM merging and ETag hashing existed, and nothing watched it.
+// The docs now carry the measured numbers; this test keeps the underlying property honest.
 //
-// The number in the docs is now the measured one; this test keeps it from rotting again.
-// The ceiling is deliberately well above the measurement — CI is slower and noisier than a
-// dev machine, and what matters is staying clearly inside the platform's 10 ms budget, not
-// defending a specific millisecond.
-test('the worst legal request stays well inside the Workers CPU budget', () => {
+// It asserts SCALING, not a millisecond ceiling. I first wrote `median < 6` calibrated on my
+// laptop, and CI measured 20.07 ms on the same code — a shared runner under contention is an
+// order of magnitude slower, so the build went red on working code. That is the same lesson
+// already recorded at the top of this file for the ReDoS budget, and I repeated it. Doubling
+// the input must roughly double the cost; a slow machine scales both halves equally, so the
+// ratio stays meaningful everywhere.
+test('per-request CPU cost scales linearly with input size', () => {
   const opts = {
     remove_markdown: true,
     remove_urls: true,
@@ -161,19 +164,46 @@ test('the worst legal request stays well inside the Workers CPU budget', () => {
     'fixture must be a multi-chunk request that passes MAX_CHUNKS, got ' + chunks
   );
 
-  const runs = [];
-  for (let i = 0; i < 9; i++) {
-    const t0 = process.hrtime.bigint();
-    once();
-    runs.push(Number(process.hrtime.bigint() - t0) / 1e6);
-  }
-  runs.sort((a, b) => a - b);
-  const median = runs[4];
+  const time = (fn) => {
+    fn();
+    const runs = [];
+    for (let i = 0; i < 9; i++) {
+      const t0 = process.hrtime.bigint();
+      fn();
+      runs.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    return runs.sort((a, b) => a - b)[4];
+  };
 
-  // The Workers CPU limit is 10ms. Fail well before it so there is room to react.
+  // Compare against a fixed reference workload measured on the SAME machine in the same
+  // run, instead of an absolute millisecond ceiling.
+  //
+  // I first asserted `median < 6`, calibrated on a dev laptop (1.96ms). CI measured 20.07ms
+  // and went red — a shared runner under contention is an order of magnitude slower. The
+  // comment at the top of this file already records exactly this lesson from the ReDoS
+  // budget (55ms local vs 273ms on a GitLab runner), and I repeated the mistake. Absolute
+  // wall-clock thresholds are not portable; a ratio against work done on the same CPU is.
+  // The reference must be the SAME work at HALF the size. Then a linear implementation gives
+  // a ratio near 2, and any super-linear regression — the real hazard, and exactly how the
+  // ReDoS bug behaved — shows up as a much larger number regardless of machine speed.
+  //
+  // A first attempt used a tiny reference (one chunk's cleaning, 0.015ms). At that scale
+  // timer granularity dominates and the ratio came out ~179 with no meaningful headroom.
+  // Comparing like with like is what makes the ratio interpretable.
+  const halfInput = input.slice(0, Math.floor(input.length / 2));
+  const half = () => {
+    const clean = cleanText(halfInput, opts);
+    const chunks = __test__.smartChunkText(clean, LIMITS.MAX_CHUNK_SIZE);
+    for (const c of chunks) __test__.getSsml(c, 'zh-CN-XiaoxiaoNeural', 1, 1, 'general');
+  };
+  const reference = time(half);
+  const worst = time(once);
+  const ratio = worst / Math.max(reference, 0.001);
+
   assert.ok(
-    median < 6,
-    `worst-case request CPU is ${median.toFixed(2)}ms — the Workers budget is 10ms, so this ` +
-      'leaves too little headroom. Measured ~1.96ms when written.'
+    ratio < 8,
+    `doubling the input multiplied the CPU cost by ${ratio.toFixed(1)}x ` +
+      `(${reference.toFixed(2)}ms -> ${worst.toFixed(2)}ms) — expected ~2x for linear work. ` +
+      'A blow-up here means the per-request path stopped scaling linearly.'
   );
 });
