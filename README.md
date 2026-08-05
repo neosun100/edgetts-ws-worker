@@ -26,10 +26,12 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
   and runs to the end (container formats like MP3 can't be played incrementally — see
   [the streaming note](#streaming)).
 - 🧩 **OpenAI-compatible** — `POST /v1/audio/speech`, drop-in for the OpenAI TTS shape.
-- 🚀 **Concurrent synthesis** — long text is sentence-chunked and synthesized with a
-  sliding-window concurrency, then streamed back in order. Measured on the deployed worker:
+- 🚀 **Concurrent synthesis** — long text is sentence-chunked and synthesized through a
+  work-conserving pool, then returned in chunk order. Measured on the deployed worker:
   600 characters split into 12 chunks took 3683ms serially versus 918ms at concurrency 10 —
-  a 4.0x speedup, with byte-identical output at every concurrency level.
+  a 4.0x speedup, with byte-identical output at every concurrency level. Both the streaming
+  and non-streaming paths refill a slot the moment one frees, so a single slow chunk never
+  idles the others (see [Concurrency](#concurrency)).
 - 🌍 **Global edge** — runs on Cloudflare's 300+ locations. Measured CPU per request: 0.007 ms
   for a typical 280-character input, 1.96 ms median (3.55 ms p95) for the 50000-character
   maximum, against the platform's 10 ms budget. Nearly all of it is chunking.
@@ -180,6 +182,30 @@ The merged file also carries a top-level `Duration`, so `<audio>.duration` and
 `seekable` are available at `loadedmetadata` — the progress bar works from the start and
 seeking is accurate without scrubbing to the end first. Measured on the deployed worker:
 `duration = 191.7` for a 4-chunk request, and a seek to 150s lands at 150.00.
+
+<a name="concurrency"></a>
+### Concurrency
+
+`concurrency` (1–20, default 10) is the number of chunks synthesized at once. Both paths use
+a **work-conserving pool**: a slot takes the next unsynthesized chunk the instant it frees,
+so one slow chunk never idles the others. Output is assembled by chunk index, so it is
+byte-identical at every concurrency level regardless of the order upstream answers.
+
+The non-streaming path previously batched — `Promise.all` over `concurrency` chunks, then the
+next batch — which put a barrier at every batch boundary, making each batch cost its *slowest*
+chunk rather than its average. Upstream latency has a long tail, so that idled slots. Measured
+through the worker against a mock upstream where every 10th chunk takes 500ms and the rest
+100ms:
+
+| Chunks @ concurrency 10 | Batched | Pool | Work-conserving bound |
+|---|---|---|---|
+| 12 | 645ms | 530ms | 160ms |
+| 24 | 1505ms | 708ms | 360ms |
+| 40 | 2012ms | 812ms | 560ms |
+
+A chunk failing for a non-retryable reason stops the pool rather than draining the remaining
+chunks: the response is already lost, and each further call would spend one of the 50
+subrequests Cloudflare allows per invocation.
 
 ## Configuration
 

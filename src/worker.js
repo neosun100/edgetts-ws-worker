@@ -936,18 +936,52 @@ async function concatWavBlobs(blobs, contentType) {
   return new Blob([out], { type: contentType });
 }
 
+/**
+ * 用固定大小的工作池并发合成所有分块，结果按原始下标归位。
+ *
+ * 取代原先的「每 concurrency 块 Promise.all 一批」：那种分批有栅栏，每批的耗时是
+ * **该批最慢一块**，而不是平均值。上游延迟有长尾（多数 ~100ms，偶发 500ms+），
+ * 于是一块慢就让同批另外 9 个槽位空转到批结束。
+ *
+ * 实测（真 worker + mock 上游，每 10 块里第 4 块 500ms、其余 100ms）：
+ * 12 块/并发 10 = 645ms，而工作量下界是 160ms。工作池把槽位一空就立刻补下一块，
+ * 总耗时收敛到 sum(work)/concurrency 附近。
+ *
+ * 流式路径（pipeChunksToStream）本来就是滑动窗口 —— 它必须按序输出，逼得它显式记
+ * 下标，顺手就成了工作池。非流式靠 Promise.all 白拿顺序，分批写法看着对，就没人发现
+ * 它在白扔延迟。这里补齐，两条路径的调度语义从此一致。
+ */
+async function synthesizeAllChunks(textChunks, concurrency, ttsArgs) {
+  const out = new Array(textChunks.length);
+  const width = Math.max(1, Math.min(concurrency, textChunks.length));
+  let next = 0;
+  // 一块失败则整个响应必定失败，剩下的分块再合成也没人要。必须显式停：
+  // 分批实现里栅栏**顺带**当了熔断（一批做完才开下一批，所以最多多花一批），
+  // 工作池没有批边界，不设这个标志就会把整个数组抽干 —— 实测 45 块 / 并发 10、
+  // 第 1 块就 400：分批只发 10 次上游调用，无标志的工作池发满 45 次。
+  // 那 35 次既白烧 subrequest 配额（单次调用上限 50），又白打上游。
+  let failed = false;
+  const worker = async () => {
+    while (!failed) {
+      const i = next++;
+      if (i >= textChunks.length) return;
+      try {
+        out[i] = await getAudioChunk(textChunks[i], ...ttsArgs, `#${i + 1}/${textChunks.length}`);
+      } catch (error) {
+        failed = true; // 先置位再抛，让同伴 worker 在下一轮循环即退出
+        throw error;
+      }
+    }
+  };
+  // 任一 worker 抛错就整体 reject（和 Promise.all 语义一致，调用方的 catch 不变）。
+  await Promise.all(Array.from({ length: width }, worker));
+  return out;
+}
+
 async function getVoice(textChunks, concurrency, ...ttsArgs) {
-  const allAudioBlobs = [];
   const contentType = ttsArgs[5] || "audio/mpeg";
   try {
-    for (let i = 0; i < textChunks.length; i += concurrency) {
-      const batch = textChunks.slice(i, i + concurrency);
-      const audioPromises = batch.map((chunk, j) =>
-        getAudioChunk(chunk, ...ttsArgs, `#${i + j + 1}/${textChunks.length}`)
-      );
-      const audioBlobs = await Promise.all(audioPromises);
-      allAudioBlobs.push(...audioBlobs);
-    }
+    const allAudioBlobs = await synthesizeAllChunks(textChunks, concurrency, ttsArgs);
     // WAV 是带头部的容器：裸拼接 N 个分块等于把 N 个完整 RIFF 文件首尾相接，
     // 播放器读到第一个头里的 data 长度就停了，后面全部音频被静默丢弃。默认
     // chunk_size=300，所以约 300 字符以上的输入就会触发——用户听到的是被截断的
