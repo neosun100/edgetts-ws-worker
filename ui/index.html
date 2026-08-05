@@ -2261,8 +2261,13 @@
         // <audio> 停下时收尾。不直接绑 stopViz：那样只关声纹，isPlaying 会一直是 true，
         // 停止按钮就赖在界面上不消失。
         onAudioStopped() {
+          // 只有在**确实没有音频还在播**时才收尾。<audio> 的 ended/pause 只代表标准播放那条
+          // 路结束了，而流式音频由 AudioContext 的时间轴驱动，与这个元素毫无关系。此前这里
+          // 无条件 stopViz()，于是用户碰一下原生暂停键（或上一次标准播放的残留事件）就会把
+          // 仍在响的流式声纹关掉 —— 实测 32 个 source 还在播，声纹已经是 false。
+          if (this.activeSources.length > 0) return;
           this.stopViz();
-          if (this.activeSources.length === 0) this.isPlaying = false;
+          this.isPlaying = false;
         },
 
         onAudioPlay() {

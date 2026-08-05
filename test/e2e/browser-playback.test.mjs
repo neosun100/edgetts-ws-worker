@@ -620,3 +620,53 @@ test('a 200 with zero bytes is reported as an error, not success', { skip: SKIP 
     await configureApp();
   }
 });
+
+test('an <audio> pause does not kill the visualiser while streaming still plays', { skip: SKIP }, async () => {
+  // <audio>'s ended/pause events only mean the STANDARD playback path finished. Streaming
+  // audio is driven by the AudioContext timeline and has nothing to do with that element, so
+  // touching the native pause button used to kill a visualiser that was still tracking live
+  // audio — measured: 32 sources still playing, vizActive already false.
+  const longServer = await startUiServer({ pcmSeconds: 20, chunkMs: 200, chunkDelayMs: 5 });
+  const page = chrome.page;
+  try {
+    await page.goto(longServer.url);
+    // The premise is that streaming actually queued sources. The app's fetch against a local
+    // stub occasionally fails outright, and without this guard the assertions would pass
+    // vacuously on an all-zero state.
+    let out = null;
+    for (let attempt = 0; attempt < 3 && !out; attempt++) {
+      const r = await page.evaluate(`(async () => {
+        const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+        vm.config.baseUrl = ${JSON.stringify(longServer.url)};
+        vm.config.apiKey = 'test-key';
+        vm.form.inputText = 'visualiser survival check';
+        await vm.generateSpeech(true);
+        const before = { live: vm.activeSources.length, viz: vm.vizActive };
+        if (before.live === 0) return { retry: true };
+        vm.onAudioStopped();                       // as <audio> pause/ended would
+        await new Promise((r) => setTimeout(r, 200));
+        const during = { live: vm.activeSources.length, viz: vm.vizActive };
+        vm.stopAllPlayback();                      // now nothing is playing
+        vm.onAudioStopped();
+        await new Promise((r) => setTimeout(r, 200));
+        return { before, during, after: { live: vm.activeSources.length, viz: vm.vizActive, playing: vm.isPlaying } };
+      })()`);
+      if (!r.retry) out = r;
+    }
+    assert.ok(out, 'streaming never queued any source across 3 attempts');
+
+    assert.ok(out.before.live > 1, 'premise: audio is queued');
+    assert.equal(out.before.viz, true, 'premise: the visualiser is running');
+    // The fix: an <audio> event must not stop a visualiser tracking live Web Audio.
+    assert.ok(out.during.live > 0, 'audio is still queued after the pause event');
+    assert.equal(out.during.viz, true, 'the visualiser survived the <audio> pause');
+    // But once nothing is playing, the same handler must tear down.
+    assert.equal(out.after.live, 0);
+    assert.equal(out.after.viz, false, 'the visualiser stops when playback really ends');
+    assert.equal(out.after.playing, false, 'isPlaying cleared, so the stop button disappears');
+  } finally {
+    await longServer.close();
+    await page.goto(server.url);
+    await configureApp();
+  }
+});
