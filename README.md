@@ -30,7 +30,9 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
   sliding-window concurrency, then streamed back in order. Measured on the deployed worker:
   600 characters split into 12 chunks took 3683ms serially versus 918ms at concurrency 10 —
   a 4.0x speedup, with byte-identical output at every concurrency level.
-- 🌍 **Global edge** — runs on Cloudflare's 300+ locations; CPU work per request is < 1 ms.
+- 🌍 **Global edge** — runs on Cloudflare's 300+ locations. Measured CPU per request: 0.007 ms
+  for a typical 280-character input, 1.96 ms median (3.55 ms p95) for the 50000-character
+  maximum, against the platform's 10 ms budget. Nearly all of it is chunking.
 - 🖥️ **Built-in web UI** — a Vue single-page app served by the Worker itself.
 - 🔓 **Open by design** — permissive CORS, no rate limit; gated only by an API key.
 

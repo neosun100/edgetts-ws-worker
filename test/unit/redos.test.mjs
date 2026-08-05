@@ -125,3 +125,55 @@ test('the hardened underscore regex still spares snake_case', () => {
     assert.equal(cleanText(input, MD), expected, `underscore: ${JSON.stringify(input)}`);
   }
 });
+
+// ---------------------------------------------------------------- CPU budget
+// The README claimed "CPU work per request is < 1 ms". Auditing it found that no longer
+// true: chunking a 50000-character input alone measures ~1.6 ms, and the whole worst-case
+// path (clean + chunk + per-chunk SSML) is ~1.96 ms median. The claim was written before
+// chunking, WAV/WebM merging and ETag hashing existed, and nothing was watching it.
+//
+// The number in the docs is now the measured one; this test keeps it from rotting again.
+// The ceiling is deliberately well above the measurement — CI is slower and noisier than a
+// dev machine, and what matters is staying clearly inside the platform's 10 ms budget, not
+// defending a specific millisecond.
+test('the worst legal request stays well inside the Workers CPU budget', () => {
+  const opts = {
+    remove_markdown: true,
+    remove_urls: true,
+    remove_emoji: true,
+    remove_line_breaks: true,
+    remove_citation_numbers: true,
+  };
+  const raw = 'ab。'.repeat(Math.ceil(LIMITS.MAX_INPUT_CHARS / 3));
+  const input = raw.slice(0, LIMITS.MAX_INPUT_CHARS);
+
+  // One full pass of the pure-CPU work a request performs before any upstream call.
+  const once = () => {
+    const clean = cleanText(input, opts);
+    const chunks = __test__.smartChunkText(clean, LIMITS.MAX_CHUNK_SIZE);
+    for (const c of chunks) __test__.getSsml(c, 'zh-CN-XiaoxiaoNeural', 1, 1, 'general');
+    return chunks.length;
+  };
+
+  const chunks = once(); // warm up, and check the fixture is the shape we think
+  assert.ok(
+    chunks > 1 && chunks <= LIMITS.MAX_CHUNKS,
+    'fixture must be a multi-chunk request that passes MAX_CHUNKS, got ' + chunks
+  );
+
+  const runs = [];
+  for (let i = 0; i < 9; i++) {
+    const t0 = process.hrtime.bigint();
+    once();
+    runs.push(Number(process.hrtime.bigint() - t0) / 1e6);
+  }
+  runs.sort((a, b) => a - b);
+  const median = runs[4];
+
+  // The Workers CPU limit is 10ms. Fail well before it so there is room to react.
+  assert.ok(
+    median < 6,
+    `worst-case request CPU is ${median.toFixed(2)}ms — the Workers budget is 10ms, so this ` +
+      'leaves too little headroom. Measured ~1.96ms when written.'
+  );
+});
