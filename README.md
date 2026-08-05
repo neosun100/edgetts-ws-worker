@@ -39,7 +39,9 @@ Open `/` in a browser. All 322 voices are filterable by language, region, gender
 `ShortName` with a one-click copy button, so it drops straight into an API call. Playback
 draws a three-layer visualizer — a **Siri-style pulsing ring**, **particle bursts** on each
 syllable onset, and a **scrolling pulse waveform** where every syllable travels along the
-time axis. A **light / dark** theme toggle (top-right) is remembered across visits.
+time axis. A **light / dark** theme toggle (top-right) is remembered across visits. A **stop button** appears while audio is playing — necessary because streamed
+audio is scheduled onto the Web Audio timeline up front, so the request finishes while
+sound continues and the native `<audio>` pause cannot reach it.
 
 The colour is **derived from the audio**, not random: hue follows the spectral centroid
 (low vowels → amber, high fricatives → cyan), saturation follows spectral crest factor
@@ -114,6 +116,13 @@ override your choice; it streams what you request. The bundled web UI rewrites t
 to `pcm` for you before sending a streaming request, and plays the result through the Web
 Audio API on a continuous timeline, so audio starts immediately and never truncates. A
 direct API caller has to make that choice itself.
+
+A streamed request that would split into more than one chunk is refused for `wav` and
+`opus` with 400 `stream_format_not_chunkable`. Those are container formats: the response
+headers are already out by the time the second chunk arrives, so there is no way to fuse the
+containers or backfill a length. Left alone it produced a 200 whose first header declared
+61.46s for a body holding 191.67s — a player stops at 32%. Use `pcm` to stream, or drop
+`stream` to get a merged file.
 
 For non-streaming requests you get a normal MP3/Opus/WAV file.
 
