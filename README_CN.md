@@ -92,8 +92,14 @@ npx wrangler deploy
 }
 ```
 
-返回对应 `Content-Type` 的音频字节。出错时返回 JSON `{ "error": { message, code, type } }`，
+返回对应 `Content-Type` 的音频字节。出错时返回 JSON `{ "error": { message, code, type, param } }`，
 `code` 精确（如 `invalid_voice`、`invalid_response_format`、`input_too_long`）。
+
+`param` 指出出错的请求字段（`voice`、`speed`、`cleaning_options.custom_keywords`，body 本身
+解析不了时是 `body`），没有单一字段可归因时为 `null`。它有必要是因为有两个 code 各服务两种
+原因：`invalid_request_error` 既是「body 不是 JSON」也是「input 缺失」，
+`invalid_cleaning_options` 既是容器类型错也是嵌套字段类型错 —— code 为了兼容既有调用方保持
+不变，靠 `param` 区分。
 
 <a name="流式"></a>
 #### 流式

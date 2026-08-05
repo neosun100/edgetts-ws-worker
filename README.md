@@ -103,8 +103,15 @@ No dependencies to install — the build and tests use only Node's built-ins.
 ```
 
 Returns the audio bytes with the matching `Content-Type` (`audio/mpeg`, `audio/webm`,
-`audio/wav`). On error, a JSON body `{ "error": { message, code, type } }` with a precise
+`audio/wav`). On error, a JSON body `{ "error": { message, code, type, param } }` with a precise
 `code` (e.g. `invalid_voice`, `invalid_response_format`, `input_too_long`).
+
+`param` names the request field at fault (`voice`, `speed`, `cleaning_options.custom_keywords`,
+or `body` for an unparseable payload), and is `null` when no single field is responsible. It
+matters because two codes each cover two causes: `invalid_request_error` is both
+"body is not JSON" and "input is missing", and `invalid_cleaning_options` is both a wrong
+container type and a wrong nested field — the codes are kept stable for existing callers, so
+`param` is what tells them apart.
 
 <a name="streaming"></a>
 #### Streaming

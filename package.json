@@ -1,6 +1,6 @@
 {
   "name": "edgetts-ws-worker",
-  "version": "2.15.0",
+  "version": "2.16.0",
   "private": true,
   "type": "module",
   "description": "Cloudflare Worker for Microsoft Edge TTS with an OpenAI-compatible API and a built-in web UI",
