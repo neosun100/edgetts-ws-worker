@@ -36,12 +36,13 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
 
 Open `/` in a browser. All 322 voices are filterable by language, region, gender, and a
 “multilingual only” toggle — or search by name / ShortName. Each voice shows its full
-`ShortName` with a one-click copy button, so it drops straight into an API call. Playback
+`ShortName` with a one-click copy button, so it drops straight into an API call.
+The picker is a proper **radio group**: arrows / Home / End move and select, Enter and Space
+confirm, and a visible focus ring follows along — so all 322 voices are reachable without a
+mouse, and screen readers announce the selection. Playback
 draws a three-layer visualizer — a **Siri-style pulsing ring**, **particle bursts** on each
 syllable onset, and a **scrolling pulse waveform** where every syllable travels along the
-time axis. A **light / dark** theme toggle (top-right) is remembered across visits. The picker is a proper **radio group**: arrows/Home/End move and select, Enter and Space
-confirm, and a visible focus ring follows along — so all 322 voices are reachable without a
-mouse and screen readers announce the selection. A **stop button** appears while audio is playing — necessary because streamed
+time axis. A **light / dark** theme toggle (top-right) is remembered across visits. A **stop button** appears while audio is playing — necessary because streamed
 audio is scheduled onto the Web Audio timeline up front, so the request finishes while
 sound continues and the native `<audio>` pause cannot reach it.
 
