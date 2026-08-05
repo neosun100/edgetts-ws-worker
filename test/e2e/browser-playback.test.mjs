@@ -469,3 +469,80 @@ test('Opus playback covers the whole clip, not just the first container', { skip
     return true;
   })()`);
 });
+
+test('streaming playback can actually be stopped', { skip: SKIP }, async () => {
+  // Streaming goes through Web Audio: playStreamPCM schedules the WHOLE clip onto the
+  // AudioContext timeline with source.start(futureTime) and then resolves, so isLoading
+  // flips to false while 30+ seconds are still queued. Measured before the fix: 34 live
+  // sources, isLoading false, and the only method on the component matching /stop/ was
+  // stopViz — which just clears the canvas. The user's only recourse was reloading.
+  //
+  // <audio controls> makes it worse rather than better: its native pause drives the
+  // standard-playback path and does nothing to the Web Audio queue, so it hands the user
+  // a control that looks authoritative and isn't.
+  const longServer = await startUiServer({ pcmSeconds: 20, chunkMs: 200, chunkDelayMs: 5 });
+  const page = chrome.page;
+  try {
+    await page.goto(longServer.url);
+    const out = await page.evaluate(`(async () => {
+      const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+      vm.config.baseUrl = ${JSON.stringify(longServer.url)};
+      vm.config.apiKey = 'test-key';
+      vm.form.inputText = 'stop control regression check';
+      await vm.generateSpeech(true);
+      const before = { live: vm.activeSources.length, playing: vm.isPlaying, viz: vm.vizActive };
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('停止'));
+      const hasButton = !!btn;
+      if (btn) btn.click();
+      await new Promise((r) => setTimeout(r, 400));
+      return {
+        before, hasButton,
+        after: { live: vm.activeSources.length, playing: vm.isPlaying, viz: vm.vizActive },
+      };
+    })()`);
+
+    // Premise: the clip really was long enough to still be playing.
+    assert.ok(out.before.live > 1, 'audio was queued, got ' + out.before.live + ' sources');
+    assert.equal(out.before.playing, true, 'isPlaying tracks actual playback, not the request');
+    assert.equal(out.hasButton, true, 'a stop control is offered while audio plays');
+    // The point: clicking it silences the queue.
+    assert.equal(out.after.live, 0, 'every scheduled source was stopped');
+    assert.equal(out.after.playing, false, 'isPlaying cleared, so the button disappears');
+    assert.equal(out.after.viz, false, 'the visualiser stopped too');
+  } finally {
+    await longServer.close();
+    await page.goto(server.url);
+    await configureApp();
+  }
+});
+
+test('starting a new generation silences the one still playing', { skip: SKIP }, async () => {
+  // Because streaming resolves while audio remains queued, "the previous one is still
+  // audible" and "a new one starts" could both be true. Measured before the fix: 31
+  // streaming sources still playing while <audio> played the standard result — two
+  // overlapping voices at once.
+  const longServer = await startUiServer({ pcmSeconds: 20, chunkMs: 200, chunkDelayMs: 5 });
+  const page = chrome.page;
+  try {
+    await page.goto(longServer.url);
+    const out = await page.evaluate(`(async () => {
+      const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+      vm.config.baseUrl = ${JSON.stringify(longServer.url)};
+      vm.config.apiKey = 'test-key';
+      vm.form.inputText = 'overlap regression check';
+      await vm.generateSpeech(true);
+      const streamLive = vm.activeSources.length;
+      await vm.generateSpeech(false);          // standard, while the stream is still queued
+      await new Promise((r) => setTimeout(r, 1000));
+      const el = vm.$refs.audioPlayer;
+      return { streamLive, live: vm.activeSources.length, elPaused: el.paused };
+    })()`);
+    assert.ok(out.streamLive > 1, 'premise: streaming queued several sources');
+    assert.equal(out.live, 0, 'the streaming queue was cleared before the new playback');
+    assert.equal(out.elPaused, false, 'the new standard playback is actually running');
+  } finally {
+    await longServer.close();
+    await page.goto(server.url);
+    await configureApp();
+  }
+});

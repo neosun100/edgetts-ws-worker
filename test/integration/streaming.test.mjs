@@ -357,3 +357,98 @@ test('a fresh cached token is reused across streaming requests', async () => {
     mock.restore();
   }
 });
+
+// ------------------------------------------------- streaming + container formats
+// The WAV merge only covered getVoice. streamVoice writes chunks straight through, so a
+// streamed multi-chunk WAV was still N concatenated RIFF files. Measured on production:
+// 901 characters (4 chunks) returned 191.67s of audio behind a first header declaring
+// 61.46s — a player stops at 32%, behind a 200 and a well-formed WAV. Opus was 4 stacked
+// EBML containers for the same input.
+//
+// Streaming cannot be fixed the way getVoice was: the headers are already out and the
+// bytes are written as they arrive, so there is no way to backfill a RIFF data length or
+// fuse Segments. Refusing before the headers go out is the only honest option, and it is
+// what README already implies — container formats cannot be decoded incrementally.
+
+const CONTAINER_STREAM_TEXT = '这是一句用来触发多分块的中文文本。'.repeat(53); // 901 chars
+
+async function statusFor(body) {
+  __test__.resetTokenCache();
+  __test__.resetVoicesCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      speechRequest({ voice: 'zh-CN-XiaoxiaoNeural', ...body }),
+      { ALLOW_ANONYMOUS: 'true' },
+      {}
+    );
+    let code = '';
+    if (res.status !== 200) {
+      code = (await res.json()).error.code;
+    } else {
+      // Drain before restoring the mock, or the still-running stream hits the real network.
+      try { await res.arrayBuffer(); } catch { /* broken stream is fine here */ }
+    }
+    return { status: res.status, code, synth: mock.calls.synth };
+  } finally {
+    mock.restore();
+  }
+}
+
+test('streamed multi-chunk wav/opus is refused before any byte is written', async () => {
+  for (const format of ['wav', 'opus']) {
+    const r = await statusFor({ input: CONTAINER_STREAM_TEXT, response_format: format, stream: true });
+    assert.equal(r.status, 400, format + ' must not stream as stacked containers');
+    assert.equal(r.code, 'stream_format_not_chunkable');
+    assert.equal(r.synth, 0, format + ': refused before spending an upstream request');
+  }
+});
+
+test('the streaming refusal names pcm as the format to use', async () => {
+  __test__.resetTokenCache();
+  const mock = installMockFetch();
+  try {
+    const res = await worker.fetch(
+      speechRequest({
+        input: CONTAINER_STREAM_TEXT,
+        voice: 'zh-CN-XiaoxiaoNeural',
+        response_format: 'wav',
+        stream: true,
+      }),
+      { ALLOW_ANONYMOUS: 'true' },
+      {}
+    );
+    const msg = (await res.json()).error.message;
+    assert.match(msg, /pcm/, 'points at the format that actually streams');
+    assert.match(msg, /stream/, 'mentions dropping stream as the alternative');
+    assert.match(msg, /4/, 'states how many chunks it would have been');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('pcm and mp3 still stream multi-chunk', async () => {
+  // pcm has no header and mp3 frames are self-synchronising, so concatenation is correct
+  // for both — the guard must not touch them.
+  for (const format of ['pcm', 'mp3']) {
+    const r = await statusFor({ input: CONTAINER_STREAM_TEXT, response_format: format, stream: true });
+    assert.equal(r.status, 200, format + ' must still stream');
+    assert.ok(r.synth > 1, format + ' really was multi-chunk, got ' + r.synth);
+  }
+});
+
+test('single-chunk wav/opus still stream (one container is already valid)', async () => {
+  for (const format of ['wav', 'opus']) {
+    const r = await statusFor({ input: '短句。', response_format: format, stream: true });
+    assert.equal(r.status, 200, format + ' single-chunk streaming is fine');
+    assert.equal(r.synth, 1, 'exactly one container');
+  }
+});
+
+test('non-streaming wav/opus are unaffected and still merged', async () => {
+  for (const format of ['wav', 'opus']) {
+    const r = await statusFor({ input: CONTAINER_STREAM_TEXT, response_format: format });
+    assert.equal(r.status, 200, format + ' non-streaming must still work');
+    assert.ok(r.synth > 1, format + ' was multi-chunk and merged, got ' + r.synth);
+  }
+});

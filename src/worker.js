@@ -350,6 +350,24 @@ async function handleSpeechRequest(request) {
   if (textChunks.length > LIMITS.MAX_CHUNKS) {
     return tooManyChunks(textChunks.length);
   }
+  // 流式 + 容器格式 + 多分块 = 静默截断。streamVoice 边收边写，头部早已发出，事后无法回填
+  // RIFF 的 data 长度、也无法把多个 WebM Segment 合成一个（非流式路径能做，是因为它先把
+  // 所有分块收齐）。线上实测 901 字符 / 4 块的流式 wav：文件含 191.67s，但首个 RIFF 头只
+  // 声明 61.46s —— 播放器在 32% 处停止，且响应是 200 + 合法 WAV，无法与正常结果区分。
+  // opus 同样是 4 个独立容器。
+  //
+  // 这正是 README 里「容器格式无法增量解码」的直接后果，所以在发头之前明确拒绝，
+  // 并指出 pcm 才是流式该用的格式（UI 已自动改写，直连 API 的调用方需要自己选）。
+  if (stream && textChunks.length > 1 && (contentType === "audio/wav" || contentType === "audio/webm")) {
+    return errorResponse(
+      `流式不支持多分块的 ${response_format}：按 chunk_size=${safeChunkSize} 会切成 ` +
+        `${textChunks.length} 块，而 ${response_format} 是带头部的容器格式，` +
+        `边发边写无法把多个容器合成一个（播放器只认第一个，会静默截断）。` +
+        `流式请用 response_format: "pcm"；若需要 ${response_format} 文件，请去掉 stream。`,
+      400,
+      "stream_format_not_chunkable"
+    );
+  }
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
   if (stream) {
     return await streamVoice(textChunks, safeConcurrency, ...ttsArgs);

@@ -593,6 +593,13 @@
       color: white;
     }
 
+    /* 停止按钮：用 --error-color 而不是硬编码红色，才能跟随明暗主题
+       （暗色主题下曾出现过硬编码颜色不随主题走的问题）。 */
+    .btn-stop {
+      background: linear-gradient(135deg, var(--error-color), #b91c1c);
+      color: white;
+    }
+
     button:hover {
       transform: translateY(-2px);
       box-shadow: 0 8px 16px rgba(0, 0, 0, 0.15);
@@ -1024,6 +1031,10 @@
           <span v-if="isLoading && isStreaming" class="loading"></span>
           {{ isLoading && isStreaming ? '流式播放中...' : '生成语音 (流式)' }}
         </button>
+        <button class="btn-stop" v-cloak v-if="isPlaying" @click="stopAllPlayback"
+                title="停止播放（流式音频已排入时间轴，只能这样中断）">
+          ⏹ 停止
+        </button>
       </div>
 
       <div class="status" :class="['status-' + status.type, { show: status.show }]" v-cloak>
@@ -1056,7 +1067,7 @@
       </div>
 
       <audio ref="audioPlayer" controls v-show="audioSrc" v-cloak :src="audioSrc"
-        @play="onAudioPlay" @ended="stopViz" @pause="stopViz"
+        @play="onAudioPlay" @ended="onAudioStopped" @pause="onAudioStopped"
         @loadstart="onAudioLoadStart" @canplay="onAudioCanPlay"></audio>
 
       <!-- 下载按钮 -->
@@ -1085,6 +1096,7 @@
           streamStats: { elapsed: '0.00', size: 0, ttfb: 0, playStart: 0, show: false },
           audioContext: null,
           activeSources: [],
+          isPlaying: false,   // 流式或标准播放中（供「停止」按钮显示；isLoading 只表示请求中）
           analyser: null,        // 频谱分析节点（两条播放路径共用）
           mediaElSource: null,   // <audio> 的 MediaElementSource（每个元素只能建一次）
           vizRAF: null,          // 可视化动画帧句柄
@@ -1350,6 +1362,32 @@
         // 同一个 URL(见 playStandard),重复 revoke 无意义;而此前只 revoke 了
         // downloadUrl、audioSrc 每次播放都新建却从不释放 —— 每个 URL 持有整个音频
         // Blob，连续生成几十次会泄漏数十 MB,浏览器不会自动回收。
+        // 唯一的停止入口：流式与标准两条播放路径都从这里收尾。
+        // 为什么需要它：流式走 Web Audio，playStreamPCM 一次把整段音频 source.start() 排到
+        // AudioContext 的硬件时钟上，排完就 resolve —— 于是 isLoading 立刻变 false，而声音
+        // 还要响几十秒。实测点一次流式后有 33 个 source 在排，组件上唯一带 stop 字样的方法
+        // 却是 stopViz（只管声纹画布），用户只能刷新页面。<audio controls> 的原生暂停键更
+        // 误导：它控制的是标准播放那条路，对流式完全无效，等于给了个假的控制权。
+        stopAllPlayback() {
+          // 1) 掐掉已排入时间轴的 Web Audio 源
+          for (const src of this.activeSources) {
+            try { src.stop(); } catch (e) { /* 已结束的 source 再 stop 会抛，忽略 */ }
+          }
+          this.activeSources = [];
+          // 2) 中止仍在读的流式响应，否则后续分块还会继续排进来
+          if (this.streamReader) {
+            try { this.streamReader.cancel(); } catch (e) { /* 已关闭则忽略 */ }
+            this.streamReader = null;
+          }
+          // 3) 停掉 <audio>（标准播放路径）
+          const el = this.$refs.audioPlayer;
+          if (el) {
+            try { el.pause(); el.currentTime = 0; } catch (e) { /* 尚未加载则忽略 */ }
+          }
+          // 4) 声纹收尾。无参调用 = 强制停止，不受代际检查影响
+          this.stopViz();
+          this.isPlaying = false;
+        },
         releaseObjectUrls() {
           const seen = new Set();
           for (const key of ['audioSrc', 'downloadUrl']) {
@@ -1436,6 +1474,10 @@
             this.streamFormatNotice = '';
           }
 
+          // 先停掉仍在播的音频。流式把整段排到 AudioContext 时间轴上后就 resolve，
+          // 所以「上一次还在响」与「这一次开始」完全可以同时成立 —— 实测流式播放中点
+          // 「生成语音(标准)」会两路同时出声（活跃 source 31 个 + <audio> 也在播）。
+          this.stopAllPlayback();
           this.isLoading = true;
           this.isStreaming = isStream;
           this.showDownloadBtn = false; // 重置下载按钮状态
@@ -1529,6 +1571,7 @@
 
             self.updateStatus('接收数据中...', 'info');
             const reader = response.body.getReader();
+            self.streamReader = reader;   // 供 stopAllPlayback() 中止仍在读的流
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
@@ -1585,16 +1628,18 @@
           if (self.audioContext.state === 'suspended') {
             await self.audioContext.resume();
           }
+          // 先停掉上一次的播放，**再**建立这一次的状态。顺序不能颠倒：stopAllPlayback 会
+          // 无参调用 stopViz()（强制停止，不受代际检查保护），夹在 startViz() 之后就会把刚
+          // 领到的这一代声纹立刻掐掉——实测表现为音频正常播（4 个 source 在跑）而
+          // vizActive 一直是 false。这和之前修过的「stale onended 关掉新一代声纹」同类。
+          // 复用统一入口，否则两处清理规则会漂移（releaseObjectUrls 当初就是这么收口的）。
+          self.stopAllPlayback();
+
           // 频谱分析节点 + 启动彩色声纹
           self.ensureAnalyser();
           // 记住这次播放对应的声纹「代号」，供下面 source.onended 判断是否该由它来收尾
           const myVizRun = self.startViz();
-          
-          // 停止之前的播放
-          if (self.activeSources) {
-            self.activeSources.forEach(s => { try { s.stop(); } catch(e) {} });
-          }
-          self.activeSources = [];
+          self.isPlaying = true;
           
           let nextPlayTime = self.audioContext.currentTime + 0.1;
           let pendingBytes = new Uint8Array(0);
@@ -1642,7 +1687,10 @@
                 const idx = self.activeSources.indexOf(source);
                 if (idx > -1) self.activeSources.splice(idx, 1);
                 // 流已接收完且没有在播的 source -> 收起声纹
-                if (!running && self.activeSources.length === 0) self.stopViz(myVizRun);
+                if (!running && self.activeSources.length === 0) {
+                  self.stopViz(myVizRun);
+                  self.isPlaying = false;   // 队列排空，停止按钮该消失了
+                }
               };
               
               if (nextPlayTime < self.audioContext.currentTime - 0.1) {
@@ -1672,6 +1720,7 @@
             
             self.updateStatus('🎵 PCM流式播放中...', 'success');
             const reader = response.body.getReader();
+            self.streamReader = reader;   // 供 stopAllPlayback() 中止仍在读的流
             
             while (true) {
               const { done, value } = await reader.read();
@@ -2178,7 +2227,15 @@
           this.vizActive = false;
         },
 
+        // <audio> 停下时收尾。不直接绑 stopViz：那样只关声纹，isPlaying 会一直是 true，
+        // 停止按钮就赖在界面上不消失。
+        onAudioStopped() {
+          this.stopViz();
+          if (this.activeSources.length === 0) this.isPlaying = false;
+        },
+
         onAudioPlay() {
+          this.isPlaying = true;
           // 标准/容器格式经 <audio> 播放，接分析节点并起可视化
           try {
             this.attachAnalyserToAudioEl();
