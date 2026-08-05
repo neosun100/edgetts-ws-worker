@@ -82,6 +82,64 @@ test('timingSafeEqual compares correctly', () => {
   assert.ok(!timingSafeEqual(undefined, 'k'));
 });
 
+test('timingSafeEqual does not short-circuit on the first differing byte', () => {
+  // Found by mutation testing: replacing the whole function body with `return a === b`
+  // left the entire suite green, because the test above only checks the RESULT — and
+  // `===` gets every one of those cases right. The reason this function exists is the
+  // constant-time property, and nothing was pinning it.
+  //
+  // Timing cannot be asserted directly (measurement noise dwarfs the signal on a shared
+  // machine). What CAN be asserted is the structural cause: the comparison must read every
+  // byte regardless of where the mismatch is. Counting reads via a Proxy makes that
+  // observable — a short-circuiting implementation reads 1 byte for an early mismatch and
+  // N for a late one, while a constant-time one reads N either way.
+  const KEY = 'k'.repeat(32);
+
+  function countReads(a, b) {
+    let reads = 0;
+    const enc = new TextEncoder();
+    const realEncode = TextEncoder.prototype.encode;
+    // Wrap the Uint8Array the function indexes into, so every element access is counted.
+    TextEncoder.prototype.encode = function (s) {
+      const bytes = realEncode.call(this, s);
+      return new Proxy(bytes, {
+        get(target, prop) {
+          if (typeof prop === 'string' && /^\d+$/.test(prop)) reads++;
+          return Reflect.get(target, prop);
+        },
+      });
+    };
+    try {
+      timingSafeEqual(a, b);
+    } finally {
+      TextEncoder.prototype.encode = realEncode;
+    }
+    void enc;
+    return reads;
+  }
+
+  // Differ at byte 0 versus at the last byte: a constant-time compare reads the same
+  // number of bytes in both cases.
+  const early = countReads(KEY, 'X' + KEY.slice(1));
+  const late = countReads(KEY, KEY.slice(0, -1) + 'X');
+  assert.ok(early > 0, 'the Proxy actually observed byte reads, got ' + early);
+  assert.equal(
+    early,
+    late,
+    `byte reads must not depend on where the mismatch is (early=${early}, late=${late}) — ` +
+      'an early exit here is a timing side channel on the API key'
+  );
+
+  // And an equal key reads the same amount again, so a match is not distinguishable either.
+  assert.equal(countReads(KEY, KEY), early, 'a matching key reads the same number of bytes');
+
+  // Scope note: this kills the dangerous shapes — an early `break`/`return` inside the loop,
+  // or dropping the comparison entirely. It does NOT kill replacing the final
+  // `return diff === 0` with `return a === b`, and that is correct: the fixed-length loop
+  // still runs, so that variant is also constant-time, and UTF-8 encoding is injective so
+  // byte equality and string equality always agree. It is an equivalent mutant, not a gap.
+});
+
 test('smartChunkText never emits a chunk over the limit', () => {
   const max = 100;
   const cases = [

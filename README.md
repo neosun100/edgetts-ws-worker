@@ -27,7 +27,9 @@ a built-in web UI, and zero infrastructure to run. Serverless, global, free-tier
   [the streaming note](#streaming)).
 - 🧩 **OpenAI-compatible** — `POST /v1/audio/speech`, drop-in for the OpenAI TTS shape.
 - 🚀 **Concurrent synthesis** — long text is sentence-chunked and synthesized with a
-  sliding-window concurrency, then streamed back in order (4×+ faster on long input).
+  sliding-window concurrency, then streamed back in order. Measured on the deployed worker:
+  600 characters split into 12 chunks took 3683ms serially versus 918ms at concurrency 10 —
+  a 4.0x speedup, with byte-identical output at every concurrency level.
 - 🌍 **Global edge** — runs on Cloudflare's 300+ locations; CPU work per request is < 1 ms.
 - 🖥️ **Built-in web UI** — a Vue single-page app served by the Worker itself.
 - 🔓 **Open by design** — permissive CORS, no rate limit; gated only by an API key.
