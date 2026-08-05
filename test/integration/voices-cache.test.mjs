@@ -340,3 +340,119 @@ test('with no cache at all, concurrent requests all degrade the same way', async
     }
   });
 });
+
+// ------------------------------------------------------------------ ETag / 304
+// The list was served with Cache-Control: public, max-age=21600 but no validator, and
+// `created` used Date.now() — so all 322 entries changed on every response, the body was
+// never byte-identical, and nothing downstream could reuse it. Measured on production:
+// cf-cache-status absent on three consecutive requests, and created went
+// 1785897556724 -> 1785897519071. Brotli was already applied by Cloudflare.
+
+test('created is stable across responses', async () => {
+  // A per-response timestamp defeats every caching layer. OpenAI's semantics for `created`
+  // are "when the model was created", not "when this response was built".
+  await withMock({}, async () => {
+    const a = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    const b = await (await worker.fetch(req('/v1/models'), ANON, {})).json();
+    assert.equal(a[0].created, b[0].created, 'created must not change between responses');
+    assert.ok(Number.isInteger(a[0].created), 'created is an integer');
+    // OpenAI uses seconds; a millisecond value here would be ~1000x too large.
+    assert.ok(a[0].created < 1e11, 'created is in seconds, not milliseconds');
+  });
+});
+
+test('both model endpoints serve an ETag and honour If-None-Match', async () => {
+  for (const path of ['/v1/models', '/v1/models/public']) {
+    await withMock({}, async () => {
+      const first = await worker.fetch(req(path), ANON, {});
+      const etag = first.headers.get('ETag');
+      assert.ok(etag, path + ' must serve an ETag');
+      assert.match(etag, /^W\//, 'a weak validator is the honest form here');
+
+      const second = await worker.fetch(
+        new Request('https://tts.test' + path, { headers: { 'if-none-match': etag } }),
+        ANON,
+        {}
+      );
+      assert.equal(second.status, 304, path + ' must answer 304 on a match');
+      assert.equal((await second.text()).length, 0, 'a 304 carries no body');
+      assert.equal(second.headers.get('ETag'), etag, 'the 304 repeats the validator');
+    });
+  }
+});
+
+test('a different filter yields a different ETag, and does not falsely match', async () => {
+  // The ETag is computed AFTER filtering on purpose. Sharing one validator across
+  // ?multilingual=true and the unfiltered list would let a conditional request receive a
+  // 304 and reuse the wrong content — a correctness bug, not just a cache miss.
+  await withMock({}, async () => {
+    const all = await worker.fetch(req('/v1/models/public'), ANON, {});
+    const filtered = await worker.fetch(req('/v1/models/public?multilingual=true'), ANON, {});
+    const allTag = all.headers.get('ETag');
+    const filteredTag = filtered.headers.get('ETag');
+    assert.notEqual(allTag, filteredTag, 'different representations need different ETags');
+
+    // Presenting the unfiltered validator against the filtered resource must NOT match.
+    const cross = await worker.fetch(
+      new Request('https://tts.test/v1/models/public?multilingual=true', {
+        headers: { 'if-none-match': allTag },
+      }),
+      ANON,
+      {}
+    );
+    assert.equal(cross.status, 200, 'must not serve 304 for a different representation');
+    const body = await cross.json();
+    assert.ok(body.every((m) => m.id.includes('Multilingual')), 'and the body is the filtered one');
+  });
+});
+
+test('a stale or malformed If-None-Match is ignored, not trusted', async () => {
+  await withMock({}, async () => {
+    for (const header of ['W/"1-deadbeef"', 'garbage', '', '*']) {
+      const res = await worker.fetch(
+        new Request('https://tts.test/v1/models', { headers: { 'if-none-match': header } }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 200, JSON.stringify(header) + ' must not produce a 304');
+    }
+  });
+});
+
+test('the ETag changes when the list changes', async () => {
+  // Otherwise a client could cache a stale list forever. Two different voice lists must
+  // produce two different validators.
+  const small = [
+    { ShortName: 'en-US-AvaNeural', Locale: 'en-US', Gender: 'Female', FriendlyName: 'Microsoft Ava Online (Natural) - English' },
+  ];
+  const bigger = [
+    ...small,
+    { ShortName: 'en-US-GuyNeural', Locale: 'en-US', Gender: 'Male', FriendlyName: 'Microsoft Guy Online (Natural) - English' },
+  ];
+  let tagA;
+  await withMock({ voices: small }, async () => {
+    tagA = (await worker.fetch(req('/v1/models'), ANON, {})).headers.get('ETag');
+  });
+  await withMock({ voices: bigger }, async () => {
+    const tagB = (await worker.fetch(req('/v1/models'), ANON, {})).headers.get('ETag');
+    assert.notEqual(tagA, tagB, 'a changed list must invalidate the old validator');
+  });
+});
+
+test('a 304 is only served to GET/HEAD, since writes are already rejected', async () => {
+  // Regression guard for ordering: the method check has to run before the conditional
+  // check, or a PUT with If-None-Match would get a 304 instead of a 405.
+  await withMock({}, async () => {
+    const etag = (await worker.fetch(req('/v1/models'), ANON, {})).headers.get('ETag');
+    const res = await worker.fetch(
+      new Request('https://tts.test/v1/models', {
+        method: 'PUT',
+        headers: { 'if-none-match': etag },
+      }),
+      ANON,
+      {}
+    );
+    assert.equal(res.status, 405, 'method rejection takes precedence over revalidation');
+    assert.equal(res.headers.get('Allow'), 'GET, HEAD, OPTIONS');
+  });
+});

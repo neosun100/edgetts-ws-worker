@@ -100,12 +100,21 @@ test('streaming playback schedules the FULL duration (no 1.67s truncation)', { s
 
   // Kick off streaming playback through the app's own code path, with a fresh counter.
   //
-  // Retry once on a fetch failure. This test drives the app's real fetch against a local
-  // stub, and after the other tests in this file have each stood up and torn down their own
-  // server, that fetch occasionally fails outright — the app then reports "Failed to fetch"
-  // and schedules nothing, which looked like a truncation regression. Retrying separates
-  // "the environment dropped the request" from "the app truncated the audio", which is the
-  // only thing this test is about. A second consecutive failure still fails the test.
+  // Retry once on a fetch failure, and be explicit that the cause is NOT understood.
+  //
+  // This test drives the app's real fetch against a local stub. Roughly one run in three the
+  // fetch fails outright, the app reports "Failed to fetch", nothing is scheduled, and the
+  // assertion below reads like a truncation regression. Reproduced deterministically once
+  // (round 1 of a 6-round loop) but not since; five separate hypotheses were tested and all
+  // ruled out: the goto/close/goto navigation pattern (4 variants, all clean), a cold-start
+  // race (4 fresh browsers, all clean), server.closeAllConnections() (clean with and
+  // without), and navigation aborting an in-flight fetch (that surfaces as AbortError, not
+  // "Failed to fetch"). So the trigger is still unknown.
+  //
+  // The retry is therefore a deliberate compromise, not a fix: it separates "the request
+  // never happened" from "the audio was truncated", which is the only thing this test is
+  // about. The stub-served-audio assertion further down is what makes a vacuous pass
+  // impossible. A second consecutive failure still fails the test.
   const startStreaming = `(() => {
     window.__sched = { totalSeconds: 0, calls: 0, lastEnd: 0 };
     const vm = document.querySelector('#app').__vue_app__._instance.proxy;

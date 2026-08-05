@@ -436,11 +436,18 @@ function voiceDisplayName(voice) {
   return m ? m[1] : friendly;
 }
 
+// 语音列表是近乎静态的（连日核对都是同一批 322 个），所以 created 用一个固定值，
+// 不用 Date.now()。OpenAI 的 models 语义里 created 是「模型创建时间」而不是「响应时间」，
+// 而每次响应都变的后果很实际：322 条里每条都不同 → 响应体逐字节不同 → ETag 无从稳定、
+// CF 边缘也无法复用（实测两次请求的 created 分别是 ...556724 和 ...519071）。
+// 取值为上游语音列表首次被完整核对的日期，只是一个稳定的锚点，不代表微软那边的真实时间。
+var MODELS_CREATED_AT = 1754265600;   // 2025-08-04T00:00:00Z，秒级（OpenAI 用秒）
+
 function toModel(voice) {
   return {
     id: voice.ShortName,
     object: "model",
-    created: Date.now(),
+    created: MODELS_CREATED_AT,
     owned_by: "microsoft",
     language: voice.Locale,
     gender: voice.Gender,
@@ -491,12 +498,44 @@ function modelsMethodCheck(request) {
   });
 }
 
-function modelsHeaders() {
+function modelsHeaders(etag) {
   return {
     "Content-Type": "application/json",
     "Cache-Control": `public, max-age=${MODELS_CACHE_SECONDS}`,
+    ...(etag ? { "ETag": etag } : {}),
     ...makeCORSHeaders()
   };
+}
+
+/**
+ * 语音列表的弱 ETag。列表本身近乎静态，加上 created 已固定，同一份列表 + 同一组过滤参数
+ * 就能得到稳定的标识，于是 304 与边缘复用才有意义（实测此前 cf-cache-status 一直是空）。
+ *
+ * 用长度 + 逐条 id 的 FNV-1a 哈希，而不是把整个 body 再算一遍 SHA：这里只需要「内容变了
+ * 就一定变」，而 32 位碰撞的代价是一次多余的 200，不是错误响应。弱 ETag（W/ 前缀）正是
+ * 表达这种语义等价而非字节相同的记法。
+ */
+function modelsEtag(models) {
+  let h = 0x811c9dc5;
+  for (const m of models) {
+    const s = m.id;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h * 0x01000193) >>> 0;
+    }
+  }
+  return `W/"${models.length}-${h.toString(16)}"`;
+}
+
+/** 请求带的 If-None-Match 命中当前 ETag 时，回 304（不带 body）。 */
+function notModified(request, etag) {
+  const inm = request.headers.get("if-none-match");
+  if (!inm) return null;
+  // 客户端可以带多个，也可能把弱标记去掉，逐个宽松比对。
+  const wanted = etag.replace(/^W\//, "");
+  const hit = inm.split(",").some((t) => t.trim().replace(/^W\//, "") === wanted);
+  if (!hit) return null;
+  return new Response(null, { status: 304, headers: modelsHeaders(etag) });
 }
 
 /**
@@ -523,9 +562,14 @@ async function handlePublicModelsRequest(request) {
   const wrongMethod = modelsMethodCheck(request);
   if (wrongMethod) return wrongMethod;
   try {
-    const models = await getModels();
-    return new Response(JSON.stringify(filterModels(models, new URL(request.url))), {
-      headers: modelsHeaders()
+    const models = filterModels(await getModels(), new URL(request.url));
+    // ETag 按**过滤后**的列表算：?multilingual=true 与不带参数是两个不同的表示，
+    // 若共用一个 ETag，带 If-None-Match 的第二个请求会拿到 304 而误用前一份内容。
+    const etag = modelsEtag(models);
+    const fresh = notModified(request, etag);
+    if (fresh) return fresh;
+    return new Response(JSON.stringify(models), {
+      headers: modelsHeaders(etag)
     });
   } catch (error) {
     console.error("获取语音列表失败:", error);
@@ -536,15 +580,20 @@ async function handleModelsRequest(request) {
   const wrongMethod = modelsMethodCheck(request);
   if (wrongMethod) return wrongMethod;
   try {
-    const models = await getModels();
-    return new Response(JSON.stringify(filterModels(models, new URL(request.url))), {
-      headers: modelsHeaders()
+    const models = filterModels(await getModels(), new URL(request.url));
+    // ETag 按**过滤后**的列表算：?multilingual=true 与不带参数是两个不同的表示，
+    // 若共用一个 ETag，带 If-None-Match 的第二个请求会拿到 304 而误用前一份内容。
+    const etag = modelsEtag(models);
+    const fresh = notModified(request, etag);
+    if (fresh) return fresh;
+    return new Response(JSON.stringify(models), {
+      headers: modelsHeaders(etag)
     });
   } catch (error) {
     console.error("获取语音列表失败:", error);
     const fallbackModels = [
-      { id: "zh-CN-XiaoxiaoNeural", object: "model", created: Date.now(), owned_by: "microsoft", language: "zh-CN", gender: "Female", description: "晓晓 - 温柔女声" },
-      { id: "zh-CN-YunxiNeural", object: "model", created: Date.now(), owned_by: "microsoft", language: "zh-CN", gender: "Male", description: "云希 - 阳光男声" }
+      { id: "zh-CN-XiaoxiaoNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Female", description: "晓晓 - 温柔女声" },
+      { id: "zh-CN-YunxiNeural", object: "model", created: MODELS_CREATED_AT, owned_by: "microsoft", language: "zh-CN", gender: "Male", description: "云希 - 阳光男声" }
     ];
     // 兜底列表不缓存：它是降级产物，不该被边缘/浏览器当成 6 小时有效的正常结果
     return new Response(JSON.stringify(fallbackModels), {
