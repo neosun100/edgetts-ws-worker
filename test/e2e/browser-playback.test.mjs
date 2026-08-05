@@ -683,3 +683,137 @@ test('an <audio> pause does not kill the visualiser while streaming still plays'
     await configureApp();
   }
 });
+
+test('malformed localStorage cannot break the page', { skip: SKIP }, async () => {
+  // localStorage is untrusted input: old versions wrote different shapes, users edit it,
+  // extensions scribble in it. Catching JSON.parse is not enough — parsed garbage breaks
+  // things too.
+  //
+  // The merge used to be `{ ...this.form, ...JSON.parse(saved) }`, a shallow spread, so a
+  // stored `cleaning: null` replaced the whole nested object. The template reads
+  // `form.cleaning.removeMarkdown`, which throws on null, and Vue then abandons the entire
+  // render pass. The symptom was deeply misleading: filteredVoices still returned 4 items
+  // and .voice-list existed, but the DOM had zero .voice-item — data fine, rendering dead.
+  // `inputText: null` failed the same way.
+  const cases = [
+    ['invalid JSON', 'tts_form', '{not json'],
+    ['null literal', 'tts_form', 'null'],
+    ['array', 'tts_form', '[1,2,3]'],
+    ['string', 'tts_form', '"hello"'],
+    ['number', 'tts_form', '42'],
+    ['empty object', 'tts_form', '{}'],
+    ['cleaning: null', 'tts_form', '{"cleaning":null}'],
+    ['cleaning: string', 'tts_form', '{"cleaning":"x"}'],
+    ['inputText: null', 'tts_form', '{"inputText":null}'],
+    ['inputText: number', 'tts_form', '{"inputText":123}'],
+    ['voice: object', 'tts_form', '{"voice":{}}'],
+    ['unknown responseFormat', 'tts_form', '{"responseFormat":"flac"}'],
+    ['speed: string', 'tts_form', '{"speed":"fast"}'],
+    ['speed: NaN-ish', 'tts_form', '{"speed":null}'],
+    ['theme: garbage', 'tts_theme', 'purple'],
+    ['config: invalid JSON', 'tts_config', '{{{'],
+    ['config: array', 'tts_config', '[]'],
+  ];
+
+  const page = chrome.page;
+  try {
+    for (const [label, key, value] of cases) {
+      await page.goto(server.url);
+      await page.evaluate(
+        '(() => { localStorage.clear(); localStorage.setItem(' +
+          JSON.stringify(key) + ', ' + JSON.stringify(value) + '); return true })()'
+      );
+      await page.goto(server.url);   // reload so mounted() reads it
+      await new Promise((r) => setTimeout(r, 600));
+
+      const state = await page.evaluate(`(() => {
+        const app = document.querySelector('#app');
+        const h1 = document.querySelector('h1');
+        const vm = app && app.__vue_app__ ? app.__vue_app__._instance.proxy : null;
+        return {
+          mounted: !!vm && !!h1 && !h1.textContent.includes('{{'),
+          voices: document.querySelectorAll('.voice-item').length,
+          canGenerate: !!(vm && typeof vm.generateSpeech === 'function'),
+          cleaningIsObject: !!(vm && vm.form.cleaning && typeof vm.form.cleaning === 'object'),
+          inputIsString: !!(vm && typeof vm.form.inputText === 'string'),
+          speedIsFinite: !!(vm && Number.isFinite(vm.form.speed)),
+        };
+      })()`);
+
+      assert.equal(state.mounted, true, label + ': Vue must still mount');
+      // The voice list rendering is what actually broke, so assert the DOM, not the computed.
+      assert.ok(state.voices > 0, label + ': the voice list must still render, got ' + state.voices);
+      assert.equal(state.canGenerate, true, label + ': the app is still usable');
+      // And the sanitised shape, so a future template change cannot hit the same null.
+      assert.equal(state.cleaningIsObject, true, label + ': cleaning stays an object');
+      assert.equal(state.inputIsString, true, label + ': inputText stays a string');
+      assert.equal(state.speedIsFinite, true, label + ': speed stays a finite number');
+    }
+  } finally {
+    await page.evaluate('(() => { localStorage.clear(); return true })()');
+    await page.goto(server.url);
+    await configureApp();
+  }
+});
+
+test('the voice picker is usable by keyboard and announced as a radio group', { skip: SKIP }, async () => {
+  // The 322-voice picker was plain <div>s with only @click: measured 0 of 4 items focusable,
+  // no role, no aria-label. A keyboard or screen-reader user could not pick a voice at all —
+  // and picking a voice is the app's core interaction.
+  //
+  // role="radio" over native <input type=radio> because each row carries badges and a copy
+  // button; a native label would swallow those into the clickable area.
+  const out = await chrome.page.evaluate(`(() => {
+    const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+    const items = () => [...document.querySelectorAll('.voice-item')];
+    const list = document.querySelector('.voice-list');
+
+    const selectedIdx = items().findIndex((el) => el.getAttribute('aria-checked') === 'true');
+    items()[selectedIdx].focus();
+    const focusWorks = document.activeElement === items()[selectedIdx];
+
+    const before = vm.form.voice;
+    vm.onVoiceKey({ key: 'ArrowDown', preventDefault() {} }, before);
+    const afterDown = vm.form.voice;
+    vm.onVoiceKey({ key: 'ArrowUp', preventDefault() {} }, afterDown);
+    const afterUp = vm.form.voice;
+    vm.onVoiceKey({ key: 'End', preventDefault() {} }, afterUp);
+    const afterEnd = vm.form.voice;
+    // Enter on an already-selected item must not throw or change anything.
+    vm.onVoiceKey({ key: 'Enter', preventDefault() {} }, afterEnd);
+    const afterEnter = vm.form.voice;
+    // A key the handler does not own must be left alone (so typing still reaches inputs).
+    let defaultPrevented = false;
+    vm.onVoiceKey({ key: 'a', preventDefault() { defaultPrevented = true; } }, afterEnter);
+
+    return {
+      groupRole: list.getAttribute('role'),
+      groupLabel: list.getAttribute('aria-label'),
+      allRadios: items().every((el) => el.getAttribute('role') === 'radio'),
+      allLabelled: items().every((el) => (el.getAttribute('aria-label') || '').length > 0),
+      checkedCount: items().filter((el) => el.getAttribute('aria-checked') === 'true').length,
+      zeroTabIndexCount: items().filter((el) => el.tabIndex === 0).length,
+      focusWorks,
+      before, afterDown, afterUp, afterEnd, afterEnter,
+      lastIsEnd: afterEnd === vm.filteredVoices[vm.filteredVoices.length - 1].id,
+      defaultPrevented,
+    };
+  })()`);
+
+  assert.equal(out.groupRole, 'radiogroup', 'the container is a radio group');
+  assert.ok(out.groupLabel, 'the group is labelled for screen readers');
+  assert.equal(out.allRadios, true, 'every item has role=radio');
+  assert.equal(out.allLabelled, true, 'every item has an aria-label');
+  assert.equal(out.checkedCount, 1, 'exactly one item is aria-checked');
+  // Roving tabindex: Tab enters the group once, arrows move within it.
+  assert.equal(out.zeroTabIndexCount, 1, 'exactly one item is in the tab order');
+  assert.equal(out.focusWorks, true, 'items are actually focusable');
+
+  // Arrow keys select, per the WAI-ARIA radiogroup pattern.
+  assert.notEqual(out.afterDown, out.before, 'ArrowDown selects a different voice');
+  assert.equal(out.afterUp, out.before, 'ArrowUp returns to the previous voice');
+  assert.equal(out.lastIsEnd, true, 'End jumps to the last voice');
+  assert.equal(out.afterEnter, out.afterEnd, 'Enter on the current item is a no-op, not an error');
+  // Unowned keys must pass through, or typing in the search box would break.
+  assert.equal(out.defaultPrevented, false, 'an unrelated key is not swallowed');
+});

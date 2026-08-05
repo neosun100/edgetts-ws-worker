@@ -352,6 +352,14 @@
       border-bottom: none;
     }
 
+    /* 键盘焦点必须可见，否则方向键移动时用户不知道自己在哪。用 focus-visible 而不是
+       focus:鼠标点击时不该出现焦点环。颜色走 --primary-color 以跟随明暗主题。 */
+    .voice-item:focus-visible {
+      outline: 2px solid var(--primary-color);
+      outline-offset: -2px;
+      background-color: var(--subtle-bg);
+    }
+
     .voice-item:hover {
       background: var(--light-gray);
     }
@@ -940,14 +948,19 @@
           </div>
 
           <!-- 结果列表：完整 ShortName 是一等公民，可直接复制 -->
-          <div class="voice-list" v-cloak>
+          <div class="voice-list" role="radiogroup" aria-label="音色选择" v-cloak>
             <div v-if="filteredVoices.length === 0" class="voice-empty">
               没有匹配的音色 —— 试试放宽条件或
               <button class="clear-btn" @click="resetVoiceFilter">清除筛选</button>
             </div>
             <div v-for="v in filteredVoices" :key="v.id"
                  :class="['voice-item', { active: v.id === form.voice }]"
-                 @click="selectVoice(v.id)">
+                 role="radio"
+                 :aria-checked="v.id === form.voice ? 'true' : 'false'"
+                 :aria-label="v.name + '，' + v.langDisplay + '，' + v.id"
+                 :tabindex="v.id === form.voice ? 0 : -1"
+                 @click="selectVoice(v.id)"
+                 @keydown="onVoiceKey($event, v.id)">
               <div class="vi-main">
                 <span class="vi-radio">{{ v.id === form.voice ? '●' : '○' }}</span>
                 <span class="vi-name">{{ v.name }}</span>
@@ -1290,11 +1303,48 @@
             console.warn('Failed to save config to localStorage:', e);
           }
         },
+        // 只接受类型正确的值，其余一律退回默认。原则:localStorage 是不可信输入。
+        mergeSavedForm(defaults, saved) {
+          if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return defaults;
+          const out = { ...defaults };
+          const takeIf = (key, type) => {
+            if (typeof saved[key] === type) out[key] = saved[key];
+          };
+          takeIf('inputText', 'string');
+          takeIf('voice', 'string');
+          takeIf('responseFormat', 'string');
+          // 数字还要挡住 NaN/Infinity —— 它们 typeof 也是 'number'，但会让 <input> 变空。
+          for (const key of ['speed', 'pitch']) {
+            if (typeof saved[key] === 'number' && Number.isFinite(saved[key])) out[key] = saved[key];
+          }
+          // cleaning 逐个布尔字段取，任何一项类型不对就保留该项默认，而不是丢掉整个对象。
+          const c = saved.cleaning;
+          if (c && typeof c === 'object' && !Array.isArray(c)) {
+            const merged = { ...defaults.cleaning };
+            for (const key of Object.keys(defaults.cleaning)) {
+              const want = typeof defaults.cleaning[key];
+              if (typeof c[key] === want) merged[key] = c[key];
+            }
+            out.cleaning = merged;
+          }
+          return out;
+        },
+
         loadForm() {
           try {
             const saved = localStorage.getItem('tts_form');
             if (saved) {
-              this.form = { ...this.form, ...JSON.parse(saved) };
+              // 按类型逐字段合并，而不是 { ...this.form, ...parsed } 浅展开。
+              //
+              // 浅展开会让存储里的 cleaning: null **整体替换**掉嵌套默认值，而模板里读的是
+              // form.cleaning.removeMarkdown —— 对 null 取属性会抛，Vue 于是放弃整个 render
+              // pass。症状极具误导性:filteredVoices 明明有 4 条、.voice-list 容器也在，
+              // 但 DOM 里 0 个 .voice-item（实测如此）。inputText: null 同理，模板对它做
+              // 字符串操作。数据是好的、渲染死了，看起来就像「音色列表无故消失」。
+              //
+              // 畸形值的来源:旧版本写入的形状、用户手改、扩展写脏、跨版本迁移。所以只 catch
+              // JSON.parse 不够 —— 解析成功的垃圾同样能让页面不可用。
+              this.form = this.mergeSavedForm(this.form, JSON.parse(saved));
             }
           } catch (e) {
             console.warn('Failed to load form from localStorage:', e);
@@ -1330,6 +1380,35 @@
             document.body.removeChild(link);
           }
         },
+        // 键盘操作音色列表。此前条目是纯 <div> + @click，实测 0/4 可聚焦 —— 键盘和读屏
+        // 用户完全选不了音色。用 role=radio + roving tabindex（只有选中项 tabindex=0）,
+        // 这是 WAI-ARIA 对 radiogroup 的标准做法:Tab 进出整组，方向键在组内移动。
+        onVoiceKey(ev, id) {
+          const keys = ['Enter', ' ', 'ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'];
+          if (!keys.includes(ev.key)) return;
+          ev.preventDefault();      // 空格会滚动页面、方向键会滚列表，都得挡住
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            this.selectVoice(id);
+            return;
+          }
+          const list = this.filteredVoices;
+          if (!list.length) return;
+          const cur = list.findIndex((v) => v.id === id);
+          let next;
+          if (ev.key === 'Home') next = 0;
+          else if (ev.key === 'End') next = list.length - 1;
+          else {
+            const step = ev.key === 'ArrowDown' || ev.key === 'ArrowRight' ? 1 : -1;
+            next = (cur + step + list.length) % list.length;   // 环绕，别在两端卡住
+          }
+          // radiogroup 的语义是「移动即选中」，同时把焦点跟过去
+          this.selectVoice(list[next].id);
+          this.$nextTick(() => {
+            const el = this.$el.querySelectorAll('.voice-item')[next];
+            if (el) el.focus();
+          });
+        },
+
         selectVoice(id) {
           this.form.voice = id;
           this.saveForm();
