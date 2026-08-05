@@ -1,5 +1,43 @@
 # Changelog
 
+## [2.15.0] - 2026-08-05
+
+补跑了此前两轮都因 agent 凭证失败而**从未审过**的 ui-robustness 角度，找到两个真缺陷。
+两者同属一类:**数据没问题，但界面不可用** —— 而且症状都极具误导性。
+
+### Fixed
+- **畸形 localStorage 会让音色列表整块消失**。合并用的是
+  `{ ...this.form, ...JSON.parse(saved) }` 浅展开，于是存储里的 `cleaning: null` **整体
+  替换**掉嵌套默认值。模板读 `form.cleaning.removeMarkdown`，对 null 取属性会抛，Vue 随即
+  放弃**整个** render pass。实测症状:`filteredVoices` 明明返回 4 条、`.voice-list` 容器也在，
+  但 DOM 里 0 个 `.voice-item` —— 数据是好的、渲染死了。这正是两轮前审计报的
+  「音色列表整块静默消失」。`inputText: null` 同理。
+  只 catch `JSON.parse` 从来不够:**解析成功的垃圾同样能让页面不可用**，而 localStorage
+  是不可信输入(旧版本写的形状、用户手改、扩展写脏)。
+  `mergeSavedForm` 现在逐字段按类型取值、数字字段挡住 NaN/Infinity、`cleaning` 逐键合并
+  （一个坏字段不会丢掉整个对象）。17 种畸形值实测:修复前 2 种让应用不可用，修复后 0 种。
+- **音色选择器完全无法用键盘操作**。条目是纯 `<div>` + `@click`，实测 0/4 可聚焦、无 role、
+  无 aria-label —— 键盘与读屏用户做不了这个应用**最核心的交互**。现在是
+  `role=radiogroup` / `role=radio` + `aria-checked` + `aria-label` + roving tabindex
+  （恰好一个条目在 tab 序列里），Enter/空格/方向键/Home/End 按 WAI-ARIA 的 radiogroup 模式。
+  处理器不认识的键会放行，否则搜索框就没法打字了。另加 `:focus-visible` 焦点环
+  （用 `--primary-color` 跟随主题）—— 焦点看不见和没有焦点差不多。
+  线上实测:322 个音色全部可键盘到达，ArrowDown 生效，tabindex=0 恰好 1 个。
+
+### 查过但**刻意不改**的(附实测理由，避免下一轮重报)
+- 主题切换与全部 5 个复制按钮**已有**标签(实测 5/5)。
+- 音色搜索用 `.includes()` 而非 `RegExp`，正则元字符天然是字面量，不会抛也不会误匹配。
+- 请求的 `Content-Type` 不校验是**故意**的:body 是合法 JSON 就能工作，不是 JSON 已由
+  `JSON.parse` 拒成 400。强制校验只会拒掉本可服务的请求，与「开放访问」的取向冲突。
+- 重复 `Authorization` 头返回的 400 来自 **Cloudflare 边缘**(HTML body、Worker 还没跑)，
+  不是我们的代码。
+- 缺 `Accept-Ranges` 与本项目无关:`<audio>` 播的是 `blob:` URL，拖动不走网络 ——
+  wav/mp3/opus 的拖动准确性此前都已实测。
+
+### 测试
+275 项(258 fast + 17 e2e)全部通过。`src/worker.js` 覆盖率 **99.47% 行 / 98.19% 分支**。
+两条新 e2e 都验证过能在旧代码上变红。
+
 ## [2.14.0] - 2026-08-05
 
 本轮最有价值的产出不是新功能，而是**定位到一个我自己造成的、追了五轮的假故障**。
