@@ -415,6 +415,19 @@ async function handleSpeechRequest(request, logCtx = null) {
 
   const rate = ((speedNum - 1) * 100).toFixed(0);
   const finalPitch = ((pitchNum - 1) * 100).toFixed(0);
+  // 这里有两种**刻意不同**的策略，模块审计时发现代码里没写明理由，补记：
+  //
+  //   speed / pitch      -> 越界即 400 拒绝（见上面 invalid_speed / invalid_pitch）
+  //   concurrency / chunk_size -> clamp 夹紧，不拒绝
+  //
+  // 依据是「用户听得出来吗」：speed/pitch 直接决定音频听起来什么样，静默改成别的值会让
+  // 调用方以为服务坏了（要 4.0 倍速却得到 2.0，音频完好、就是不对）。而 concurrency 与
+  // chunk_size 是**性能旋钮**，只影响上游调用的次数与并发，不改变音频内容 —— 实测
+  // concurrency=1e9 与 concurrency=20 的上游调用次数完全相同。夹紧比拒绝对调用方更友好。
+  //
+  // clamp 的语义也记一下（`clamp(0, 50, ...)` 与 `clamp("abc", 50, ...)` 结果不同）：
+  // 能转成有限数就**夹到 [min,max]**，转不成才用 fallback。所以 chunk_size=0 得到 50（min）
+  // 而不是 300（default）—— 审计时我一度以为是后者，实测 180 字符切出 4 块才确认。
   const safeConcurrency = clamp(concurrency, LIMITS.MIN_CONCURRENCY, LIMITS.MAX_CONCURRENCY, DEFAULT_CONCURRENCY);
   const safeChunkSize = clamp(chunk_size, LIMITS.MIN_CHUNK_SIZE, LIMITS.MAX_CHUNK_SIZE, DEFAULT_CHUNK_SIZE);
   // Only formats the cognitiveservices/v1 endpoint actually accepts. aac and flac
@@ -1001,6 +1014,10 @@ function injectWebmDuration(bytes, durationMs) {
 }
 
 function mergeWebmChunks(buffers) {
+  // 空输入返回 null（降级）而不是抛。生产上进不来（调用点有 length > 1 的前提），
+  // 但这是个**纯字节函数**且被 __test__ 导出，按项目自己的规则「无法处理时要降级留痕，
+  // 不要抛」它就该这么写 —— 模块审计里 fuzz 到的唯一一处会抛异常的输入。
+  if (!buffers || buffers.length === 0) return null;
   const parsed = [];
   for (const buf of buffers) {
     const bytes = new Uint8Array(buf);

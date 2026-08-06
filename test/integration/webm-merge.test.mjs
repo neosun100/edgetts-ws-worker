@@ -379,3 +379,48 @@ test('injection is skipped rather than risked when Info is not the expected shap
   const infoAt = merged.indexOf(0x15);
   assert.equal(merged[infoAt + 4], 0x83, 'the unexpected size encoding was not rewritten');
 });
+
+test('mergeWebmChunks degrades to null on empty input instead of throwing', () => {
+  // 模块审计里 fuzz 到的唯一一处会抛异常的输入（12 种畸形字节 + 8 种组合里只有这一个）。
+  // 生产上进不来 —— 调用点有 `allAudioBlobs.length > 1` 的前提 —— 但这是个**纯字节函数**
+  // 且被 __test__ 导出，按项目自己的规则「无法处理时降级留痕，不要抛」就该返回 null，
+  // 让调用方退回裸拼接。抛异常会一路冒到 getVoice 的 catch，变成一个 500，
+  // 而真正该发生的是「合并放弃、音频照发」。
+  assert.equal(__test__.mergeWebmChunks([]), null);
+  assert.equal(__test__.mergeWebmChunks(null), null);
+  assert.equal(__test__.mergeWebmChunks(undefined), null);
+});
+
+test('mergeWebmChunks preserves every cluster and keeps timestamps monotonic', () => {
+  // 用**生产代码自己的解析器**做判据，而不是手写字节扫描。
+  //
+  // 审计时我先用 `扫全文件找 E7 88` 的办法，三次得出「时间戳非单调」的结论 —— 全是假警报：
+  // 音频负载里本来就会出现 E7 88 字节序列，扫出来的 1.65e19、4.9e18 这种荒谬值就是证据
+  // （真时间戳是 500ms 的等差阶梯）。第二版改成「只认 Cluster 头之后的 Timecode」，
+  // 结果匹配到 0 个，于是「✅ 单调」是在空数组上的**空洞通过**。
+  //
+  // 教训：解析二进制格式时，用被测代码自己的解析器当判据；手写扫描器本身就是新的 bug 源。
+  const chunks = [0, 1, 2].map((i) =>
+    new Uint8Array(readFileSync(new URL(`../fixtures/opus-chunk${i}.webm`, import.meta.url)))
+  );
+  const perChunk = chunks.map((c) => __test__.parseWebmChunk(c));
+  const totalIn = perChunk.reduce((s, p) => s + p.clusters.length, 0);
+  // 前提：每个源块的时间戳都从 0 开始 —— 这正是裸拼接会丢音频的原因。
+  for (const p of perChunk) assert.equal(p.clusters[0].tc, 0, '每个源块都从 0 开始');
+
+  const merged = __test__.mergeWebmChunks(chunks);
+  assert.ok(merged, '三个真实块必须能合并');
+  const out = __test__.parseWebmChunk(merged);
+
+  assert.equal(out.clusters.length, totalIn, `cluster 一个不能丢：${totalIn} 个`);
+  const tc = out.clusters.map((c) => c.tc);
+  for (let i = 1; i < tc.length; i++) {
+    assert.ok(tc[i] > tc[i - 1], `时间戳必须严格递增，第 ${i} 个：${tc[i - 1]} -> ${tc[i]}`);
+  }
+  // 总时长应约等于各块之和（差值来自每块尾部的 CodecDelay）。
+  const sum = perChunk.reduce((s, p) => s + p.duration, 0);
+  assert.ok(
+    Math.abs(out.duration - sum) < 100,
+    `合并后时长 ${out.duration}ms 应约等于各块之和 ${sum}ms`
+  );
+});
