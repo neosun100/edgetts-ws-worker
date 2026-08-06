@@ -412,3 +412,103 @@ test('both READMEs document every field the log actually emits', async () => {
     );
   }
 });
+
+test('a zero-byte upstream response is refused instead of passed through as success', async () => {
+  // Found by running the voice/format/chunks matrix against production, which is exactly what
+  // the logging was built to enable. Upstream answers 200 with an EMPTY body when the voice has
+  // no coverage for the input's writing system — it does not report an error.
+  //
+  // Measured live (2026-08-06): Chinese, Japanese, and punctuation-only text to
+  // en-US-AvaNeural gave `200 audio/mpeg, content-length: 0` on 5/5 attempts. The same voice
+  // with English text gave 12240 bytes; the same Chinese with en-US-AvaMultilingualNeural gave
+  // 10656. A zh-CN voice reading English works fine, so this is zero coverage rather than a
+  // language mismatch.
+  //
+  // Passing it through is the same silent-success class this project already fixed twice (WAV
+  // and Opus truncation): a well-formed empty file that a caller cannot tell from a real one.
+  __test__.resetTokenCache();
+  const mock = installMockFetch({
+    synth: () => new Response(new Uint8Array(0), { status: 200, headers: { 'Content-Type': 'audio/mpeg' } }),
+  });
+  try {
+    const res = await worker.fetch(
+      speechRequest({ input: '你好', voice: 'en-US-AvaNeural' }, KEY),
+      ENV,
+      {}
+    );
+    assert.equal(res.status, 502, 'an empty upstream body is our dependency failing, so 5xx');
+    const body = await res.json();
+    assert.equal(body.error.code, 'upstream_empty_audio');
+    assert.equal(body.error.param, 'voice', 'the actionable field is named');
+    assert.match(body.error.message, /Multilingual|多语言|voice/i, 'the message points at a fix');
+
+    await sleep(60);
+    const lines = reqLines(mock);
+    assert.equal(lines[0].status, 502);
+    assert.equal(lines[0].level, 'error', '5xx is error level');
+    assert.equal(lines[0].bytes, 0, 'bytes:0 is what makes this findable in aggregate');
+    assert.equal(lines[0].code, 'upstream_empty_audio');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('a healthy response records its byte count', async () => {
+  // The other half: without `bytes` on successes there is no baseline, and `bytes: 0` would
+  // carry no comparative meaning. Its absence is why the production zero-byte case was nearly
+  // missed even after the logging shipped.
+  const { res, lines } = await run({ input: '你好世界', voice: 'zh-CN-XiaoxiaoNeural' });
+  assert.equal(res.status, 200);
+  assert.ok(lines[0].bytes > 0, 'a successful response reports a positive byte count');
+});
+
+test('a streamed empty response is marked stream_empty, since it cannot be refused', async () => {
+  // Streaming commits its headers before the first chunk, so the status cannot be changed to
+  // 502 afterwards. The honest limit: the log is the only place it can surface. Marked with its
+  // own phase so it is directly aggregatable rather than requiring a bytes==0 computation.
+  __test__.resetTokenCache();
+  const mock = installMockFetch({ synth: () => new Response(new Uint8Array(0), { status: 200 }) });
+  try {
+    const res = await worker.fetch(
+      speechRequest(
+        { input: '你好', voice: 'en-US-AvaNeural', stream: true, response_format: 'pcm' },
+        KEY
+      ),
+      ENV,
+      {}
+    );
+    assert.equal(res.status, 200, 'the status was already committed');
+    assert.equal((await res.arrayBuffer()).byteLength, 0);
+    await sleep(150);
+
+    const lines = reqLines(mock);
+    assert.equal(lines[0].phase, 'stream_empty', 'distinct from a healthy stream_end');
+    assert.equal(lines[0].bytes, 0);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('a non-empty stream is still marked stream_end, not stream_empty', async () => {
+  // Guards the condition itself: if `stream_empty` were emitted unconditionally it would be
+  // worse than useless, since every stream would look broken.
+  __test__.resetTokenCache();
+  const mock = installMockFetch({ synth: async () => ({ body: fakeAudio(30) }) });
+  try {
+    const res = await worker.fetch(
+      speechRequest(
+        { input: '你好世界', voice: 'zh-CN-XiaoxiaoNeural', stream: true, response_format: 'pcm' },
+        KEY
+      ),
+      ENV,
+      {}
+    );
+    assert.ok((await res.arrayBuffer()).byteLength > 0);
+    await sleep(150);
+    const lines = reqLines(mock);
+    assert.equal(lines[0].phase, 'stream_end');
+    assert.ok(lines[0].bytes > 0);
+  } finally {
+    mock.restore();
+  }
+});

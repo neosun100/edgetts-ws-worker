@@ -118,6 +118,7 @@ async function emitLog(ctx, res, extra) {
     ...(ctx.concurrency !== undefined ? { conc: ctx.concurrency } : {}),
     ...(ctx.stream !== undefined ? { stream: ctx.stream } : {}),
     ...(ctx.inputChars !== undefined ? { chars: ctx.inputChars } : {}),
+    ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}),
     ...(code ? { code } : {}),
     ...(ctx.degraded ? { degraded: ctx.degraded } : {}),
     ...extra
@@ -723,7 +724,13 @@ async function streamVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
   // （streamLogged 标记）。这也是 `ms` 对两条路径含义不同的地方，已在字段名注释里说明。
   if (logCtx) logCtx.streamLogged = true;
   pipeChunksToStream(writable.getWriter(), textChunks, concurrency, logCtx, ...ttsArgs)
-    .then(() => emitLog(logCtx, null, { status: 200, phase: "stream_end" }))
+    .then(() => {
+      // 流式无法在发头之后改状态码，所以「上游给了 0 字节」这件事在流式路径上**只能**靠
+      // 日志暴露（非流式已改为 502 upstream_empty_audio）。单独标记出来，这样
+      // "phase=stream_empty" 可以直接聚合，而不必先算 bytes==0。
+      const empty = !logCtx || !logCtx.bytes;
+      emitLog(logCtx, null, { status: 200, phase: empty ? "stream_empty" : "stream_end" });
+    })
     .catch((error) => {
       console.error("流式 TTS 失败:", error);
       // 头已发出，HTTP 状态无法再改，但日志必须体现「这条流是断的」——
@@ -762,6 +769,7 @@ async function pipeChunksToStream(writer, chunks, concurrency, logCtx, ...ttsArg
 
     for (let i = 0; i < chunks.length; i++) {
       const buffer = await inFlight.get(i);
+      if (logCtx) logCtx.bytes = (logCtx.bytes || 0) + buffer.byteLength;
       inFlight.delete(i);
       schedule(i + window);
       await writer.write(new Uint8Array(buffer));
@@ -1112,6 +1120,28 @@ async function getVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
       audioBody = await concatWebmBlobs(allAudioBlobs, contentType, logCtx);
     } else {
       audioBody = new Blob(allAudioBlobs, { type: contentType });
+    }
+    if (logCtx) logCtx.bytes = audioBody.size;
+    // 上游会对「文本的语种该音色完全不支持」返回 **200 + 0 字节**，而不是报错。
+    // 线上实测（2026-08-06）：中文 / 日文 / 纯标点 送给 en-US-AvaNeural，5/5 次都是
+    // `200 audio/mpeg, content-length: 0`；同一音色送英文正常（12240B），同一中文送
+    // en-US-AvaMultilingualNeural 也正常（10656B）。zh-CN 音色读英文没问题，所以这不是
+    // 「跨语种」而是「该音色对这套书写系统零覆盖」。
+    //
+    // 原样透传 = 又一次静默失败：调用方拿到的是格式合法的空音频，与成功无法区分
+    // （本项目已经为 WAV / Opus 各修过一次同类问题）。UI 侧早已拒绝零字节流，但直连
+    // API 的调用方没有这层保护。这里明确报错，并指出可执行的出路。
+    if (audioBody.size === 0) {
+      return errorResponse(
+        "上游返回了空音频（0 字节）。最常见的原因是该 voice 完全不支持这段文本的书写系统 —— " +
+          "例如把中文送给 en-US-AvaNeural。请换成对应语种的音色，或用带 Multilingual 的音色；" +
+          "可用 id 见 GET /v1/models。",
+        502,
+        "upstream_empty_audio",
+        "api_error",
+        null,
+        "voice"
+      );
     }
     return new Response(audioBody, {
       headers: { "Content-Type": contentType, ...makeCORSHeaders() }

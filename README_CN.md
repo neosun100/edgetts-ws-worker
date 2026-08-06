@@ -122,6 +122,18 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 
 非流式请求则返回正常的 MP3/Opus/WAV 文件。
 
+#### 上游返回空音频会被拒绝，不会透传
+
+当音色对输入文本的**书写系统完全没有覆盖**时，上游返回的是 `200` + **0 字节**，并不报错。
+线上实测：中文 / 日文 / 纯标点送给 `en-US-AvaNeural`，5 次全是
+`200 audio/mpeg, content-length: 0`；而同一音色送英文正常（12240 字节）、同一段中文送
+`en-US-AvaMultilingualNeural` 也正常（10656 字节）。（`zh-CN` 音色读英文没问题 ——
+所以这不是「语种不匹配」，而是「零覆盖」。）
+
+原样透传就是又一次静默成功：调用方拿到一个格式合法的空音频，与真结果无法区分。因此非流式
+请求会返回 502 `upstream_empty_audio`，并指出可能原因与出路。**流式无法拒绝**（响应头早已
+发出），改为在日志里记 `phase: "stream_empty"` + `bytes: 0`。
+
 ### `GET /v1/models` · `GET /v1/models/public`
 
 以类 OpenAI-models 结构列出全部音色（322 个）。两个端点接受相同的查询过滤：
@@ -215,10 +227,11 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 | `ms` | 挂钟耗时。**流式记的是到流结束**，不是响应头发出的时刻 |
 | `upstream` | 实际发出的上游调用数 —— 每次都消耗 Cloudflare 单次调用 50 个 subrequest 之一，所以重试的那次也算 |
 | `retries` | 重试次数。有了它，「重试率」才终于有分母 |
+| `bytes` | 响应音频字节数。`0` 就是上游静默失败的样子 —— 见下方 `upstream_empty_audio` |
 | `code` | 仅 4xx/5xx 才有：与响应体里同一个机器可读错误码 |
 | `voice` `format` `chunks` `conc` `stream` `chars` | 请求维度。**校验失败时是省略、不是填 null** —— 一个被拒的请求没有有意义的 voice，填 null 只会污染聚合 |
 | `degraded` | 仅在发生静默降级时出现（如 `wav_merge_declined_no_riff`） |
-| `phase` | 仅流式：`stream_end` 或 `stream_broken`。响应头一发出状态就锁在 200 了，所以这是中途断流**唯一**看得见的地方 |
+| `phase` | 仅流式：`stream_end`、`stream_empty` 或 `stream_broken`。响应头一发出状态就锁在 200 了，所以这是中途断流**唯一**看得见的地方 |
 
 **绝不记录**：API key，以及 input 文本 —— 连哈希、连截断都不记，因为那是调用方的内容。
 `chars` 只带长度，让输入规模仍可聚合。

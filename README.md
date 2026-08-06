@@ -142,6 +142,21 @@ containers or backfill a length. Left alone it produced a 200 whose first header
 
 For non-streaming requests you get a normal MP3/Opus/WAV file.
 
+#### An empty upstream response is refused, not passed on
+
+Upstream answers `200` with a **zero-byte body** when the voice has no coverage for the input's
+writing system at all — it does not report an error. Measured live: Chinese, Japanese, or
+punctuation-only text sent to `en-US-AvaNeural` returned `200 audio/mpeg, content-length: 0` on
+5 of 5 attempts, while the same voice with English text returned 12240 bytes, and the same
+Chinese text with `en-US-AvaMultilingualNeural` returned 10656 bytes. (A `zh-CN` voice reading
+English is fine — this is zero coverage, not a language mismatch.)
+
+Passing that through would be another silent success: a well-formed empty audio file, which a
+caller cannot distinguish from a real one. Non-streaming requests are therefore refused with
+502 `upstream_empty_audio`, naming the likely cause and the fix. A *streamed* request cannot be
+refused — its headers are long gone — so it is recorded in the log as `phase: "stream_empty"`
+with `bytes: 0` instead.
+
 ### `GET /v1/models` · `GET /v1/models/public`
 
 Lists the available voices (322) in an OpenAI-models-like shape. Both endpoints accept
@@ -248,10 +263,11 @@ Every request emits exactly one JSON line, successes included. `[observability]`
 | `ms` | Wall-clock duration. **For streams this covers synthesis to stream end**, not header commit |
 | `upstream` | Upstream calls actually made — each spends one of Cloudflare's 50 subrequests per invocation, so retried attempts count |
 | `retries` | Retried attempts, which finally gives a retry *rate* a denominator |
+| `bytes` | Response audio size. `0` is how a silent upstream failure shows up — see `upstream_empty_audio` below |
 | `code` | Present on 4xx/5xx only: the same machine-readable code as the response body |
 | `voice` `format` `chunks` `conc` `stream` `chars` | Request dimensions. **Omitted, not nulled, when the request failed validation** — a rejected request has no meaningful voice, and nulls would pollute aggregation |
 | `degraded` | Present only when something silently fell back (e.g. `wav_merge_declined_no_riff`) |
-| `phase` | Streams only: `stream_end` or `stream_broken`. Once headers are out the status is stuck at 200, so this is the *only* place a mid-stream failure is visible |
+| `phase` | Streams only: `stream_end`, `stream_empty`, or `stream_broken`. Once headers are out the status is stuck at 200, so this is the *only* place a mid-stream failure is visible |
 
 **Never logged:** the API key, and the input text — not even hashed or truncated, because it is
 the caller's content. `chars` carries the length so input size stays aggregatable.
