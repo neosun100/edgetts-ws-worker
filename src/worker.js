@@ -451,15 +451,51 @@ async function handleSpeechRequest(request, logCtx = null) {
   // 1011 块），而这个请求注定被下面的 MAX_CHUNKS 拒绝。端到端实测 39.2ms —— 一个必然失败
   // 的请求就花掉 4 倍于 Workers 10ms CPU 预算的算力，等于给攻击者一条免费的消耗路径。
   const minChunks = Math.ceil(cleanedInput.length / safeChunkSize);
-  const tooManyChunks = (count) =>
-    errorResponse(
+  // 给「把这段文本装进 45 块所需的 chunk_size」，而不是「45 × 当前 chunk_size 能装多少字符」。
+  //
+  // 后者是错的，而且会自相矛盾：50000 字符 + chunk_size=1124 被拒时，旧文案却说
+  // 「当前 chunk_size 下最多约 50580 字符」—— 宣称 50580 可行，而 50000 已经被拒。
+  // 根因是 45 × chunk_size 只是**乘积上界**，仅当每块都填满才成立；标点会让块提前收尾，
+  // 实测填充率 88–100%，所以真实容量总是更小。这正是 v2.20.0 在 README 里修掉的
+  // 「90000 字符不可达」同一类错误 —— 当时改了文档，**没改错误文案**。
+  //
+  // 另外 MAX_INPUT_CHARS 是硬上限且先于分块校验，所以任何超过它的数字都不可能达到。
+  // 用**实际分块**二分出一个真的能过的 chunk_size，而不是拿系数去估。
+  //
+  // 估算行不通，试过了：ceil(len/45) 乘 1.05/1.15/1.25/1.4/1.6 各跑 88 个
+  // (字符数 × 文本形态) 组合，**没有一个系数全通过**。原因是填充率不是常数，而是
+  // 量化效应：当 chunk_size 略小于句长的整数倍时，每块都会浪费接近一整句。
+  // 实测 chunk_size=125 下的填充率，「82 字符句」只有 65%、「44 字符句」71%，
+  // 而无标点文本 100%。乘一个系数治不了这个。
+  //
+  // 二分最多 ~11 次 smartChunkText。只在**已经要返回 413** 的路径上跑，正常请求不受影响；
+  // 而给出一个「照着改就能过」的数字，比一个算得快但会误导的乘积有用得多。
+  const suggestChunkSize = () => {
+    const lo0 = Math.ceil(cleanedInput.length / LIMITS.MAX_CHUNKS);
+    let lo = Math.max(LIMITS.MIN_CHUNK_SIZE, lo0), hi = LIMITS.MAX_CHUNK_SIZE, best = null;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (smartChunkText(cleanedInput, mid).length <= LIMITS.MAX_CHUNKS) { best = mid; hi = mid - 1; }
+      else lo = mid + 1;
+    }
+    // 向上取整到 25 的倍数，给调用方一个好记的数（区间单调，取整后必然仍然可行）。
+    return best === null ? null : Math.min(LIMITS.MAX_CHUNK_SIZE, Math.ceil(best / 25) * 25);
+  };
+  const tooManyChunks = (count) => {
+    const suggest = suggestChunkSize();
+    const enough = suggest !== null;
+    return errorResponse(
       `文本过长：按 chunk_size=${safeChunkSize} 会切成 ${count} 个分块，` +
         `超过上限 ${LIMITS.MAX_CHUNKS}（Cloudflare Workers 单请求最多 50 个子请求）。` +
-        `当前 chunk_size 下最多约 ${LIMITS.MAX_CHUNKS * safeChunkSize} 字符；调大 chunk_size` +
-        `（上限 ${LIMITS.MAX_CHUNK_SIZE}）可处理更长文本，或把文本拆成多次请求。`,
+        (enough
+          ? `这段文本（${cleanedInput.length} 字符）请把 chunk_size 调到约 ${suggest} 以上` +
+            `（上限 ${LIMITS.MAX_CHUNK_SIZE}）；块越粗则上游调用越少。`
+          : `即使用最大的 chunk_size=${LIMITS.MAX_CHUNK_SIZE} 也装不下这段文本` +
+            `（${cleanedInput.length} 字符），请拆成多次请求。`),
       413,
       "too_many_chunks"
     );
+  };
   if (minChunks > LIMITS.MAX_CHUNKS) {
     // 报下界而不是真实块数：真实块数只会更大，而为了得到它就得付上面那笔算力。
     return tooManyChunks("至少 " + minChunks);

@@ -567,3 +567,112 @@ test('README never presents the chunk-budget product as a reachable capability',
     }
   }
 });
+
+test('the too_many_chunks message suggests a chunk_size that actually works', async () => {
+  // Found by mapping the chunks dimension (docs/research/chunk-distribution-20260806.md).
+  //
+  // The old message said "当前 chunk_size 下最多约 N 字符" computed as MAX_CHUNKS * chunk_size.
+  // That is a product BOUND, only reachable if every chunk is filled to capacity — and
+  // punctuation ends chunks early, so real capacity is always lower. It produced a
+  // self-contradiction: a 50000-character request at chunk_size 1124 was rejected while the
+  // very same response claimed "up to about 50580 characters" works. This is the same
+  // unreachable-product error fixed in the README at v2.20.0; the error STRING kept it.
+  //
+  // Now the message binary-searches an actually-feasible chunk_size. Estimating was tried and
+  // abandoned: multiplying ceil(len/45) by 1.05 / 1.15 / 1.25 / 1.4 / 1.6 was checked against
+  // 88 (length x shape) combinations and NO factor passed them all, because fill ratio is a
+  // quantisation effect rather than a constant — measured 65% for 82-char sentences and 100%
+  // for unpunctuated text at the same chunk_size.
+  const { MAX_CHUNKS, MAX_CHUNK_SIZE } = __test__.LIMITS;
+
+  // Shapes with deliberately different fill ratios, at SEVERAL lengths.
+  //
+  // The length matters as much as the shape, and a mutation run proved it: with only
+  // 50000-character inputs, swapping the binary search back for the failed `* 1.05` factor
+  // still passed. That factor breaks at ~5000 characters, where a 44-char sentence period is a
+  // large fraction of the chunk — so the short cases are exactly the ones that discriminate.
+  const gen = {
+    'english prose': (n) => 'The quick brown fox jumps over the lazy dog. '.repeat(Math.ceil(n / 44)).slice(0, n),
+    '82-char sentences': (n) => ('a'.repeat(80) + '. ').repeat(Math.ceil(n / 82)).slice(0, n),
+    'very short sentences': (n) => 'Short. '.repeat(Math.ceil(n / 7)).slice(0, n),
+    'dense CJK punctuation': (n) => 'ab。'.repeat(Math.ceil(n / 3)).slice(0, n),
+  };
+  const shapes = {};
+  for (const [name, f] of Object.entries(gen)) {
+    for (const len of [5000, 20000, 50000]) shapes[`${name} @${len}`] = f(len);
+  }
+
+  for (const [label, input] of Object.entries(shapes)) {
+    // 1. A chunk_size that is far too small must be refused.
+    let suggested;
+    await withMock({}, async (mock) => {
+      const res = await worker.fetch(
+        speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: 50 }),
+        ANON,
+        {}
+      );
+      assert.equal(res.status, 413, label + ': the minimum chunk_size must be refused for this input');
+      const body = await res.json();
+      assert.equal(body.error.code, 'too_many_chunks');
+      assert.equal(body.error.param, 'chunk_size', label + ': names the field to change');
+      assert.equal(mock.calls.synth, 0, label + ': a refusal must not call upstream');
+
+      const m = /调到约 (\d+) 以上/.exec(body.error.message);
+      assert.ok(m, label + ': the message must contain a concrete chunk_size to use, got: ' + body.error.message);
+      suggested = Number(m[1]);
+      assert.ok(
+        suggested <= MAX_CHUNK_SIZE,
+        label + `: suggesting ${suggested} exceeds the ${MAX_CHUNK_SIZE} maximum, which is unusable`
+      );
+      // The old bug in one assertion: the message must not promise a capacity above the
+      // hard character cap, because MAX_INPUT_CHARS is checked before chunking.
+      const promised = body.error.message.match(/最多约 (\d+) 字符/);
+      assert.equal(promised, null, label + ': must not state an unreachable "up to N characters"');
+    });
+
+    // 2. THE POINT: following the suggestion must actually succeed. Without this the fix would
+    //    just be a different misleading number — my first attempt (a 1.05 factor) failed here
+    //    on English prose at 5000 characters, suggesting 125 where 56 chunks resulted.
+    await withMock({}, async (mock) => {
+      const res = await worker.fetch(
+        speechRequest({ input, voice: 'en-US-AvaNeural', chunk_size: suggested }),
+        ANON,
+        {}
+      );
+      assert.equal(
+        res.status,
+        200,
+        label + `: the suggested chunk_size ${suggested} must work, got ${res.status}`
+      );
+      assert.ok(
+        mock.calls.synth <= MAX_CHUNKS,
+        label + `: ${mock.calls.synth} chunks exceeds MAX_CHUNKS`
+      );
+    });
+  }
+});
+
+test('chunk count decreases monotonically as chunk_size grows', async () => {
+  // The suggestion above binary-searches, and rounds the result up to a multiple of 25. Both
+  // steps are only valid if chunk count never INCREASES with a larger chunk_size. Verified
+  // across 4 shapes x every chunk_size from 50 to 2000 (7800 points) with zero violations;
+  // this test samples that so the property cannot silently regress if smartChunkText changes.
+  const { smartChunkText, LIMITS } = __test__;
+  const shapes = [
+    'ab。'.repeat(7000).slice(0, 20000),
+    'The quick brown fox jumps over the lazy dog. '.repeat(500).slice(0, 20000),
+    ('a'.repeat(80) + '. ').repeat(300).slice(0, 20000),
+  ];
+  for (const text of shapes) {
+    let prev = Infinity;
+    for (let cs = LIMITS.MIN_CHUNK_SIZE; cs <= LIMITS.MAX_CHUNK_SIZE; cs += 37) {
+      const n = smartChunkText(text, cs).length;
+      assert.ok(
+        n <= prev,
+        `chunk count rose from ${prev} to ${n} when chunk_size reached ${cs} — the binary ` +
+          'search in the too_many_chunks suggestion assumes monotonicity and would be unsound'
+      );
+      prev = n;
+    }
+  }
+});

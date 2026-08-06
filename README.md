@@ -322,7 +322,22 @@ allows 50 per invocation. The Worker therefore refuses more than 45 chunks with 
 
 To synthesise longer text, raise `chunk_size` or split the text across requests. Coarser
 chunks mean fewer, longer upstream calls — slightly slower to first byte, but far more
-headroom.
+headroom. **A 413 tells you the specific `chunk_size` to use**, computed for your actual text
+rather than estimated.
+
+How much to raise it depends on the text, because punctuation ends chunks early. Measured
+(see [the sweep](docs/research/chunk-distribution-20260806.md)):
+
+| `chunk_size` | Max characters before 413 | Fill ratio |
+|---|---|---|
+| 300 (default) | 12179–13500 depending on shape | 90–100% |
+| 500 | 22279–22500 | — |
+| 1125 | 50000 (the cap) for typical prose | 88–95% |
+| 2000 (max) | 50000 with room to spare | 91–100% |
+
+Verified live: 50000 characters of English prose is refused at `chunk_size` 1124 and accepted
+at 1125 — matching the local prediction exactly. Text with long unpunctuated runs packs
+better and needs less (533 sufficed for one shape); text made of short sentences needs more.
 
 **The two limits are in series, so the real ceiling is whichever binds first.** At
 `chunk_size` 2000 the chunk budget would allow 45 × 2000 = 90000 characters, but
