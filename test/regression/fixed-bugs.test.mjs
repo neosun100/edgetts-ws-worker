@@ -607,3 +607,30 @@ test('BUG#11b the browser harness serves Vue locally, not from the CDN', async (
     await server.close();
   }
 });
+
+test('the built bundle carries no test-only export (guard was CI-only until now)', () => {
+  // CI has a step that greps dist/worker.js for the test-export name and fails the build if it
+  // is present, so a test-only surface cannot reach production. That guard existed ONLY in CI,
+  // which means `npm test` could not catch a violation — and I duly hit it: a comment I added
+  // in src/worker.js mentioned the export by name, the build strips the export but keeps
+  // comments, and both pipelines went red on a commit whose local gate was green.
+  //
+  // Moving the check here makes the local gate equivalent to CI for this property. The name is
+  // assembled at runtime for the same reason CLOSE_SCRIPT above is: writing it literally would
+  // make THIS file trip the very grep it is testing, if the file were ever bundled.
+  const EXPORT_NAME = '__' + 'test' + '__';
+  if (!existsSync(DIST_PATH)) {
+    // Mirrors how the other dist-reading tests behave: nothing to check before a build.
+    return;
+  }
+  const dist = readFileSync(DIST_PATH, 'utf8');
+  assert.ok(
+    !dist.includes(EXPORT_NAME),
+    `dist/worker.js still contains the ${EXPORT_NAME} export or a mention of it. The build strips ` +
+      'the export itself but keeps comments, so even naming it in a comment trips this. ' +
+      'Run `npm run build` and check src/worker.js for prose that spells the name out.'
+  );
+  // And the source must still export it, or every unit test loses its entry point.
+  const src = readFileSync(fileURLToPath(new URL('src/worker.js', ROOT)), 'utf8');
+  assert.ok(src.includes('export const ' + EXPORT_NAME), 'src must still export it for the tests');
+});

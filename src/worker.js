@@ -1015,8 +1015,12 @@ function injectWebmDuration(bytes, durationMs) {
 
 function mergeWebmChunks(buffers) {
   // 空输入返回 null（降级）而不是抛。生产上进不来（调用点有 length > 1 的前提），
-  // 但这是个**纯字节函数**且被 __test__ 导出，按项目自己的规则「无法处理时要降级留痕，
-  // 不要抛」它就该这么写 —— 模块审计里 fuzz 到的唯一一处会抛异常的输入。
+  // 但这是个**纯字节函数**、且经测试导出可被直接调用，按项目自己的规则
+  // 「无法处理时要降级留痕，不要抛」它就该这么写 —— 模块审计里 fuzz 到的唯一一处会抛的输入。
+  //
+  // 注：这段注释刻意不写那个测试导出的**字面名字**。CI 有一步是
+  // `grep -q "<那个名字>" dist/worker.js` 就报错，用来确认构建剥掉了测试专用导出；
+  // 而构建只剥导出、保留注释，所以注释里提到它会让 CI 变红（我已经踩过一次）。
   if (!buffers || buffers.length === 0) return null;
   const parsed = [];
   for (const buf of buffers) {
