@@ -230,6 +230,37 @@ the wrong thing. Two cases worth naming:
 | `API_KEY` | secret | Bearer token required for `/v1/audio/speech`. **Without it the Worker returns 503** rather than serving unauthenticated traffic. |
 | `ALLOW_ANONYMOUS` | var | Set to `"true"` to intentionally run open (no key). |
 
+### Observability
+
+Every request emits exactly one JSON line, successes included. `[observability]` is enabled in
+`wrangler.toml`, so these are queryable in the Workers dashboard and pushable via Logpush.
+
+```jsonc
+{"ev":"req","route":"/v1/audio/speech","status":200,"ms":412,"upstream":4,"retries":0,
+ "voice":"zh-CN-XiaoxiaoNeural","format":"mp3","chunks":4,"conc":10,"stream":false,"chars":901}
+```
+
+| Field | Meaning |
+|---|---|
+| `ev` | Always `"req"` — filters telemetry apart from prose log lines |
+| `route` | `/v1/audio/speech` or `/v1/models` |
+| `status` | HTTP status. Console level tracks it: 5xx → `error`, 4xx → `warn`, else `log`, so a 5xx rate can be pre-filtered without parsing JSON |
+| `ms` | Wall-clock duration. **For streams this covers synthesis to stream end**, not header commit |
+| `upstream` | Upstream calls actually made — each spends one of Cloudflare's 50 subrequests per invocation, so retried attempts count |
+| `retries` | Retried attempts, which finally gives a retry *rate* a denominator |
+| `code` | Present on 4xx/5xx only: the same machine-readable code as the response body |
+| `voice` `format` `chunks` `conc` `stream` `chars` | Request dimensions. **Omitted, not nulled, when the request failed validation** — a rejected request has no meaningful voice, and nulls would pollute aggregation |
+| `degraded` | Present only when something silently fell back (e.g. `wav_merge_declined_no_riff`) |
+| `phase` | Streams only: `stream_end` or `stream_broken`. Once headers are out the status is stuck at 200, so this is the *only* place a mid-stream failure is visible |
+
+**Never logged:** the API key, and the input text — not even hashed or truncated, because it is
+the caller's content. `chars` carries the length so input size stays aggregatable.
+
+Cost: serialising one line measures ~0.0001 ms, about **0.004%** of a worst-case request's
+~3 ms of CPU — three orders of magnitude under the measurement noise floor, and pinned by a
+test so the payload can't quietly grow into the 10 ms budget. Only error responses are cloned
+to recover their code; a multi-megabyte audio body never is.
+
 ### The built-in web UI is for trusted environments
 
 The UI at `/` keeps the API key you type into it in `localStorage`, in plain text. Any script

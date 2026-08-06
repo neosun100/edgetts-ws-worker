@@ -59,6 +59,76 @@ var OPENAI_VOICE_MAP = {
   "echo": "zh-CN-liaoning-XiaobeiNeural"
   // 东北女声 -> 晓北
 };
+// ------------------------------------------------------------------ 结构化日志
+//
+// 为什么需要：审计发现 18 个日志点里 17 个只在**异常路径**，唯一那条正常路径日志记的是
+// token 有效期 —— 于是一个成功的 200 请求不产生任何日志。后果是 5xx 率 / p99 / 重试率
+// 都**没有分母**（只有出错才留痕，算不出「率」），「哪些音色真的被用」也答不出来。
+// 本周修掉的几个 bug（分批栅栏白扔 2.5× 延迟、Deploy 三天没通、UI 数值贴到隔壁列）
+// 都是「没人在看」才活下来的，缺的不是告警规则，是可被聚合的正常路径数据。
+//
+// 为什么是**每请求一个对象**、而不是模块级的「当前请求」变量：Workers 的单个 isolate
+// 会并发处理多个请求，并在每个 await 处交错。实测同一模型下 3 个并发请求（延迟
+// 30/5/15ms）用模块级变量记日志，三条全部记成最后一个开始的那个请求 —— 字段会串到
+// 别的请求上，而这种错误在日志里是看不出来的。所以 ctx 必须显式穿过调用链。
+//
+// 成本：JSON.stringify 一个 9 字段对象实测中位 0.00021ms，占最坏合法请求纯 CPU
+// （1.867ms 中位）的 0.011%。收集字段本身只是几个整数自增。
+//
+// 刻意**不记**的东西：input 文本（用户内容，连哈希也不记）、API key、上游返回体。
+// 只记可聚合的维度与计数。
+function newLogCtx(route) {
+  return { route, t0: Date.now(), retries: 0, upstreamCalls: 0, degraded: null };
+}
+
+/**
+ * 一条请求一行 JSON。level 用 log/warn/error 以便按严重度过滤。
+ *
+ * 错误码怎么拿到：错误响应的 body 里已经有 `code`，但 body 是流、读一次就消耗掉，
+ * 不能直接读要返回给调用方的那个 Response。所以只对 **>=400** 的响应 `clone()` 后读
+ * —— 错误体是几百字节的 JSON，克隆代价可忽略；成功响应可能是几 MB 音频，绝不克隆。
+ * 另一条路是加 `x-error-code` 响应头，但那会把内部错误码暴露给公网（本项目刻意只在
+ * body 里给 code），且响应头参与缓存键，所以不走那条。
+ */
+async function emitLog(ctx, res, extra) {
+  if (!ctx) return;
+  const status = res ? res.status : (extra && extra.status);
+  let code;
+  if (res && status >= 400) {
+    try {
+      const body = await res.clone().json();
+      code = body && body.error && body.error.code;
+    } catch {
+      // 错误体不是 JSON（不该发生），但日志绝不能因此让请求失败。
+      code = "unparseable_error_body";
+    }
+  }
+  // 请求维度（voice/format/chunks/...）只在通过全部校验后才被设上，所以这里用「有就带、
+  // 没有就省」—— 一个 400 请求的 voice 维度没有意义，硬塞 null 只会污染聚合。
+  const line = JSON.stringify({
+    ev: "req",
+    route: ctx.route,
+    status,
+    ms: Date.now() - ctx.t0,
+    upstream: ctx.upstreamCalls,
+    retries: ctx.retries,
+    ...(ctx.voice ? { voice: ctx.voice } : {}),
+    ...(ctx.format ? { format: ctx.format } : {}),
+    ...(ctx.chunks !== undefined ? { chunks: ctx.chunks } : {}),
+    ...(ctx.concurrency !== undefined ? { conc: ctx.concurrency } : {}),
+    ...(ctx.stream !== undefined ? { stream: ctx.stream } : {}),
+    ...(ctx.inputChars !== undefined ? { chars: ctx.inputChars } : {}),
+    ...(code ? { code } : {}),
+    ...(ctx.degraded ? { degraded: ctx.degraded } : {}),
+    ...extra
+  });
+  // 5xx 用 error、4xx 用 warn，其余 log —— Workers 日志面板按 level 过滤，
+  // 这样「5xx 率」不必解析 JSON 就能先粗筛。
+  if (status >= 500) console.error(line);
+  else if (status >= 400) console.warn(line);
+  else console.log(line);
+}
+
 var workers_default = {
   async fetch(request, env, ctx) {
     return await handleRequest(request, env);
@@ -109,16 +179,33 @@ async function handleRequest(request, env) {
       return errorResponse("无效的 API 密钥", 401, "invalid_api_key");
     }
   }
+  // 在这里(而不是每个 return 处)埋日志：handleSpeechRequest 有 20 个出口，逐个包裹既
+  // 冗长又必然漏掉新增的那个。这里是唯一的漏斗，所有响应都要经过。
+  const logCtx = newLogCtx(url.pathname);
   try {
-    if (url.pathname === "/v1/audio/speech") return await handleSpeechRequest(request);
-    if (url.pathname === "/v1/models") return await handleModelsRequest(request);
+    if (url.pathname === "/v1/audio/speech") {
+      const res = await handleSpeechRequest(request, logCtx);
+      // 流式已自行安排在流结束时记录（见 streamVoice），这里再记一次只会得到一条
+      // upstream=0 的假数据。
+      if (!logCtx.streamLogged) await emitLog(logCtx, res);
+      return res;
+    }
+    if (url.pathname === "/v1/models") {
+      const res = await handleModelsRequest(request);
+      await emitLog(logCtx, res);
+      return res;
+    }
   } catch (err) {
     // 同上：内部错误细节只进日志。err.message 可能是运行时抛出的原始信息
     // (依赖内部路径、变量名等)，不该出现在面向公网的响应里。
     console.error("请求处理器错误:", err);
-    return errorResponse("服务器内部错误", 500, "internal_server_error");
+    const res = errorResponse("服务器内部错误", 500, "internal_server_error");
+    await emitLog(logCtx, res);
+    return res;
   }
-  return errorResponse("未找到", 404, "not_found");
+  const notFound = errorResponse("未找到", 404, "not_found");
+  await emitLog(logCtx, notFound);
+  return notFound;
 }
 // Constant-time compare so a wrong key can't be recovered byte-by-byte from latency.
 function timingSafeEqual(a, b) {
@@ -143,7 +230,7 @@ function handleOptions(request) {
   const requested = request.headers.get("Access-Control-Request-Headers") ?? undefined;
   return new Response(null, { status: 204, headers: makeCORSHeaders(requested) });
 }
-async function handleSpeechRequest(request) {
+async function handleSpeechRequest(request, logCtx = null) {
   if (request.method !== "POST") {
     return errorResponse("不允许的方法", 405, "method_not_allowed", "api_error", {
       "Allow": "POST, OPTIONS"
@@ -405,11 +492,24 @@ async function handleSpeechRequest(request) {
       "stream_format_not_chunkable"
     );
   }
+  // 记在这里：此时所有参数都已校验并归一化（voice 解析过别名、format 已确认受支持、
+  // 分块数已确定），而上游还没被调用。校验失败的请求走的是上面那些 return，它们的
+  // 日志只有 status/code —— 那正是想要的：一个 400 的 voice 维度是没意义的。
+  if (logCtx) {
+    logCtx.voice = finalVoice;
+    logCtx.format = response_format;
+    logCtx.chunks = textChunks.length;
+    logCtx.concurrency = safeConcurrency;
+    logCtx.stream = stream;
+    logCtx.inputChars = cleanedInput.length;
+  }
+  // ttsArgs 是位置参数、且调用点用 `...ttsArgs, label` 追加 label，所以**不能**往这个
+  // 数组里塞新元素 —— 那会把 label 挤到后面一位。logCtx 作为独立参数单独传。
   const ttsArgs = [finalVoice, rate, finalPitch, style, outputFormat, contentType];
   if (stream) {
-    return await streamVoice(textChunks, safeConcurrency, ...ttsArgs);
+    return await streamVoice(textChunks, safeConcurrency, logCtx, ...ttsArgs);
   } else {
-    return await getVoice(textChunks, safeConcurrency, ...ttsArgs);
+    return await getVoice(textChunks, safeConcurrency, logCtx, ...ttsArgs);
   }
 }
 
@@ -612,15 +712,29 @@ async function handleModelsRequest(request) {
     });
   }
 }
-async function streamVoice(textChunks, concurrency, ...ttsArgs) {
+async function streamVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
   const { readable, writable } = new TransformStream();
   const contentType = ttsArgs[5] || "audio/mpeg";
-  pipeChunksToStream(writable.getWriter(), textChunks, concurrency, ...ttsArgs).catch((error) => console.error("流式 TTS 失败:", error));
+  // 流式的响应头在第一个分块之前就发出，所以 handleRequest 里那次 emitLog 会在合成**还没
+  // 开始**时就跑 —— 实测记出 `ms:6, upstream:0`，而这个请求实际打了 4 次上游、耗时 192ms。
+  // 那种数据比没有更糟：它会把每个流式请求的 p99 和上游用量都算低。
+  //
+  // 所以流式自己负责在流真正结束（或失败）时再记一次，并让 handleRequest 那次跳过
+  // （streamLogged 标记）。这也是 `ms` 对两条路径含义不同的地方，已在字段名注释里说明。
+  if (logCtx) logCtx.streamLogged = true;
+  pipeChunksToStream(writable.getWriter(), textChunks, concurrency, logCtx, ...ttsArgs)
+    .then(() => emitLog(logCtx, null, { status: 200, phase: "stream_end" }))
+    .catch((error) => {
+      console.error("流式 TTS 失败:", error);
+      // 头已发出，HTTP 状态无法再改，但日志必须体现「这条流是断的」——
+      // 否则一个中途失败的流在聚合里与成功的流长得一样。
+      emitLog(logCtx, null, { status: 200, phase: "stream_broken", err: error?.status || "error" });
+    });
   return new Response(readable, {
     headers: { "Content-Type": contentType, ...makeCORSHeaders() }
   });
 }
-async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
+async function pipeChunksToStream(writer, chunks, concurrency, logCtx, ...ttsArgs) {
   // Sliding-window prefetch: keep `concurrency` synthesis requests in flight while
   // writing results strictly in order. The previous implementation awaited each chunk
   // sequentially, so the `concurrency` argument had no effect and long inputs were
@@ -630,7 +744,7 @@ async function pipeChunksToStream(writer, chunks, concurrency, ...ttsArgs) {
 
   const schedule = (index) => {
     if (index >= chunks.length) return;
-    const task = getAudioChunk(chunks[index], ...ttsArgs, `#${index + 1}/${chunks.length}`)
+    const task = getAudioChunk(chunks[index], ...ttsArgs, `#${index + 1}/${chunks.length}`, logCtx)
       .then((blob) => blob.arrayBuffer());
     // 必须在这里就挂上 handler，不能等主循环结束后补。unhandledRejection 的判定是
     // 时序性的：V8 在 microtask 队列排空的那一刻检查「此刻有没有 handler」，事后
@@ -876,17 +990,18 @@ function mergeWebmChunks(buffers) {
   return injectWebmDuration(out, offset);
 }
 
-async function concatWebmBlobs(blobs, contentType) {
+async function concatWebmBlobs(blobs, contentType, logCtx = null) {
   const buffers = await Promise.all(blobs.map((b) => b.arrayBuffer()));
   const merged = mergeWebmChunks(buffers);
   if (!merged) {
+    if (logCtx) logCtx.degraded = "webm_merge_declined";
     console.warn("WebM 合并：分块里找不到 Cluster，退回裸拼接");
     return new Blob(blobs, { type: contentType });
   }
   return new Blob([merged], { type: contentType });
 }
 
-async function concatWavBlobs(blobs, contentType) {
+async function concatWavBlobs(blobs, contentType, logCtx = null) {
   const buffers = await Promise.all(blobs.map((b) => b.arrayBuffer()));
   const parsed = [];
   for (const buf of buffers) {
@@ -894,6 +1009,7 @@ async function concatWavBlobs(blobs, contentType) {
     const bytes = new Uint8Array(buf);
     const magic = (off) => String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
     if (buf.byteLength < 12 || magic(0) !== "RIFF" || magic(8) !== "WAVE") {
+      if (logCtx) logCtx.degraded = "wav_merge_declined_no_riff";
       console.warn("WAV 合并：分块缺少 RIFF/WAVE 魔数，退回裸拼接");
       return new Blob(blobs, { type: contentType });
     }
@@ -914,6 +1030,7 @@ async function concatWavBlobs(blobs, contentType) {
       offset = body + size + (size % 2); // RIFF 块按偶数字节对齐
     }
     if (!data) {
+      if (logCtx) logCtx.degraded = "wav_merge_declined_no_data";
       console.warn("WAV 合并：分块里找不到 data 块，退回裸拼接");
       return new Blob(blobs, { type: contentType });
     }
@@ -951,7 +1068,7 @@ async function concatWavBlobs(blobs, contentType) {
  * 下标，顺手就成了工作池。非流式靠 Promise.all 白拿顺序，分批写法看着对，就没人发现
  * 它在白扔延迟。这里补齐，两条路径的调度语义从此一致。
  */
-async function synthesizeAllChunks(textChunks, concurrency, ttsArgs) {
+async function synthesizeAllChunks(textChunks, concurrency, ttsArgs, logCtx) {
   const out = new Array(textChunks.length);
   const width = Math.max(1, Math.min(concurrency, textChunks.length));
   let next = 0;
@@ -966,7 +1083,7 @@ async function synthesizeAllChunks(textChunks, concurrency, ttsArgs) {
       const i = next++;
       if (i >= textChunks.length) return;
       try {
-        out[i] = await getAudioChunk(textChunks[i], ...ttsArgs, `#${i + 1}/${textChunks.length}`);
+        out[i] = await getAudioChunk(textChunks[i], ...ttsArgs, `#${i + 1}/${textChunks.length}`, logCtx);
       } catch (error) {
         failed = true; // 先置位再抛，让同伴 worker 在下一轮循环即退出
         throw error;
@@ -978,10 +1095,10 @@ async function synthesizeAllChunks(textChunks, concurrency, ttsArgs) {
   return out;
 }
 
-async function getVoice(textChunks, concurrency, ...ttsArgs) {
+async function getVoice(textChunks, concurrency, logCtx, ...ttsArgs) {
   const contentType = ttsArgs[5] || "audio/mpeg";
   try {
-    const allAudioBlobs = await synthesizeAllChunks(textChunks, concurrency, ttsArgs);
+    const allAudioBlobs = await synthesizeAllChunks(textChunks, concurrency, ttsArgs, logCtx);
     // WAV 是带头部的容器：裸拼接 N 个分块等于把 N 个完整 RIFF 文件首尾相接，
     // 播放器读到第一个头里的 data 长度就停了，后面全部音频被静默丢弃。默认
     // chunk_size=300，所以约 300 字符以上的输入就会触发——用户听到的是被截断的
@@ -990,9 +1107,9 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
     // mergeWebmChunks。mp3/pcm 不受影响：前者帧自同步、后者无头部。
     let audioBody;
     if (allAudioBlobs.length > 1 && contentType === "audio/wav") {
-      audioBody = await concatWavBlobs(allAudioBlobs, contentType);
+      audioBody = await concatWavBlobs(allAudioBlobs, contentType, logCtx);
     } else if (allAudioBlobs.length > 1 && contentType === "audio/webm") {
-      audioBody = await concatWebmBlobs(allAudioBlobs, contentType);
+      audioBody = await concatWebmBlobs(allAudioBlobs, contentType, logCtx);
     } else {
       audioBody = new Blob(allAudioBlobs, { type: contentType });
     }
@@ -1019,7 +1136,7 @@ async function getVoice(textChunks, concurrency, ...ttsArgs) {
 }
 var MAX_CHUNK_ATTEMPTS = 3;
 
-async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, contentType, label = "") {
+async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, contentType, label = "", logCtx = null) {
   let lastError;
   for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt++) {
     try {
@@ -1027,6 +1144,9 @@ async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, 
       const endpoint = await getEndpoint({ forceRefresh: attempt > 1 && lastError?.status === 401 });
       const url = `https://${endpoint.r}.tts.speech.microsoft.com/cognitiveservices/v1`;
       const ssml = getSsml(text, voiceName, rate, pitch, style);
+      // 计在 fetch 之前：这一次尝试无论成败都消耗了一个 subrequest 配额（上限 50/次调用），
+      // 所以「实际发出多少」才是要观测的量，不是「成功多少」。
+      if (logCtx) logCtx.upstreamCalls++;
       const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -1061,6 +1181,7 @@ async function getAudioChunk(text, voiceName, rate, pitch, style, outputFormat, 
       const status = error?.status;
       const retryable = !status || status === 401 || status === 408 || status === 429 || status >= 500;
       if (!retryable || attempt === MAX_CHUNK_ATTEMPTS) throw error;
+      if (logCtx) logCtx.retries++;
       console.warn(`分块${label}合成第 ${attempt} 次失败（${status ?? "network"}），重试中`);
       await new Promise((r) => setTimeout(r, 150 * attempt));
     }

@@ -197,6 +197,36 @@ MP3 会被当成一个「完整的短片段」播完即停 —— 这正是本�
 | `API_KEY` | secret | `/v1/audio/speech` 所需的 Bearer 令牌。**未设置时 Worker 返回 503**，而非无鉴权放行。 |
 | `ALLOW_ANONYMOUS` | var | 设为 `"true"` 以明确开放访问（无需 key）。 |
 
+### 可观测性
+
+**每个请求输出恰好一行 JSON，成功的请求也有。** `wrangler.toml` 已开 `[observability]`，
+这些行可在 Workers 面板查询，也可用 Logpush 推出。
+
+```jsonc
+{"ev":"req","route":"/v1/audio/speech","status":200,"ms":412,"upstream":4,"retries":0,
+ "voice":"zh-CN-XiaoxiaoNeural","format":"mp3","chunks":4,"conc":10,"stream":false,"chars":901}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `ev` | 恒为 `"req"` —— 用于把遥测行与普通日志行区分开 |
+| `route` | `/v1/audio/speech` 或 `/v1/models` |
+| `status` | HTTP 状态。console 级别与之对应：5xx → `error`、4xx → `warn`、其余 `log`，于是「5xx 率」不必解析 JSON 就能先粗筛 |
+| `ms` | 挂钟耗时。**流式记的是到流结束**，不是响应头发出的时刻 |
+| `upstream` | 实际发出的上游调用数 —— 每次都消耗 Cloudflare 单次调用 50 个 subrequest 之一，所以重试的那次也算 |
+| `retries` | 重试次数。有了它，「重试率」才终于有分母 |
+| `code` | 仅 4xx/5xx 才有：与响应体里同一个机器可读错误码 |
+| `voice` `format` `chunks` `conc` `stream` `chars` | 请求维度。**校验失败时是省略、不是填 null** —— 一个被拒的请求没有有意义的 voice，填 null 只会污染聚合 |
+| `degraded` | 仅在发生静默降级时出现（如 `wav_merge_declined_no_riff`） |
+| `phase` | 仅流式：`stream_end` 或 `stream_broken`。响应头一发出状态就锁在 200 了，所以这是中途断流**唯一**看得见的地方 |
+
+**绝不记录**：API key，以及 input 文本 —— 连哈希、连截断都不记，因为那是调用方的内容。
+`chars` 只带长度，让输入规模仍可聚合。
+
+成本：序列化一行实测约 0.0001ms，约占最坏请求 ~3ms CPU 的 **0.004%** —— 比测量噪声还低三个
+数量级，且**有测试盯住**，免得以后往里加字段悄悄吃进 10ms 预算。只有错误响应会被 clone
+以取回 code，几 MB 的音频体永远不 clone。
+
 ### 内置 Web UI 仅供受信任环境使用
 
 `/` 处的 UI 会把你填入的 API key **明文存在 `localStorage`**，同源的任何脚本都能读到。

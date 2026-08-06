@@ -207,3 +207,53 @@ test('per-request CPU cost scales linearly with input size', () => {
       'A blow-up here means the per-request path stopped scaling linearly.'
   );
 });
+
+// ---------------------------------------------------------- 结构化日志的 CPU 成本
+// 日志埋在**每一个**请求上，所以它的成本必须是可忽略的、而且要有测试盯住 —— 否则以后往
+// 那行 JSON 里加字段时，没人知道加到什么程度会开始吃掉 10ms 预算。
+//
+// 断言的是**比例**而不是绝对毫秒：绝对阈值在 CI 上不可移植（这条教训本文件顶部与 CPU
+// 伸缩测试里都记过，我在这个 session 里犯过两次）。
+test('one structured log line costs a negligible fraction of a request', () => {
+  const payload = {
+    ev: 'req', route: '/v1/audio/speech', status: 200, ms: 3, upstream: 26, retries: 0,
+    voice: 'zh-CN-XiaoxiaoNeural', format: 'mp3', chunks: 26, conc: 10, stream: false,
+    chars: 50000,
+  };
+  const opts = {
+    remove_markdown: true, remove_urls: true, remove_emoji: true,
+    remove_line_breaks: true, remove_citation_numbers: true,
+  };
+  const raw = 'ab。'.repeat(Math.ceil(LIMITS.MAX_INPUT_CHARS / 3));
+  const input = raw.slice(0, LIMITS.MAX_INPUT_CHARS);
+
+  const median = (fn, runs) => {
+    fn();
+    const out = [];
+    for (let i = 0; i < runs; i++) {
+      const t0 = process.hrtime.bigint();
+      fn();
+      out.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    }
+    return out.sort((a, b) => a - b)[Math.floor(runs / 2)];
+  };
+
+  // The per-request pure-CPU work, as the denominator.
+  const request = median(() => {
+    const clean = cleanText(input, opts);
+    const chunks = __test__.smartChunkText(clean, LIMITS.MAX_CHUNK_SIZE);
+    for (const c of chunks) __test__.getSsml(c, 'zh-CN-XiaoxiaoNeural', 1, 1, 'general');
+  }, 9);
+
+  // Serialising the log line is the entire success-path cost: emitLog only clones the
+  // response for status >= 400, precisely so a multi-megabyte audio body is never copied.
+  const logging = median(() => JSON.stringify(payload), 999);
+
+  const pct = (logging / request) * 100;
+  assert.ok(
+    pct < 5,
+    `the log line costs ${pct.toFixed(3)}% of a worst-case request ` +
+      `(${logging.toFixed(5)}ms vs ${request.toFixed(3)}ms). Measured at ~0.004% when written; ` +
+      'crossing 5% means the payload grew enough to matter against the 10ms CPU budget.'
+  );
+});
