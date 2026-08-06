@@ -312,3 +312,128 @@ test('an empty custom_keywords entry does not shadow the real keywords', () => {
   assert.equal(cleanText('abc', { custom_keywords: 'a,' }), 'bc');
   assert.equal(cleanText('keep sponsor out', { custom_keywords: 'sponsor, ,' }), 'keep  out');
 });
+
+// ------------------------------------- markdown 系统审计（2026-08-06）发现的三处缺陷
+// 方法：对 7 条 markdown 正则各准备「该处理 / 不该动 / 畸形」三类输入批量跑。
+// 判据是「念出来是不是用户想听的」，而不是「像不像 markdown」。
+
+test('remove_markdown keeps double underscores inside identifiers', () => {
+  // 内部不一致：单 `_` 那条早就有 \w 边界保护（my_func_name 完好），而 `**` 与 `__` 共用
+  // 一条 /(\*\*|__)(.*?)\1/ 正则，于是 `__` 拿不到保护。同一份代码对同类输入两种待遇 —— 
+  // 这不是权衡，是漏了。实测受害者都是真实文本：
+  //   变量 my__temp__value  -> 变量 mytempvalue
+  //   常量 MAX__SIZE__LIMIT -> 常量 MAXSIZELIMIT
+  assert.equal(cleanText('变量 my__temp__value', { remove_markdown: true }), '变量 my__temp__value');
+  assert.equal(cleanText('常量 MAX__SIZE__LIMIT', { remove_markdown: true }), '常量 MAX__SIZE__LIMIT');
+  assert.equal(cleanText('a__b__c', { remove_markdown: true }), 'a__b__c');
+});
+
+test('remove_markdown still strips __bold__ and **bold**, including Chinese', () => {
+  // 修上面那条的风险所在。`**` 这条刻意**不加** \w 边界：中文没有词边界，
+  // `这是**重点**内容` 的 `**` 两侧都是中文字符，加了边界会让中文粗体全部失效。
+  const md = { remove_markdown: true };
+  assert.equal(cleanText('__粗体__', md), '粗体');
+  assert.equal(cleanText('前 __粗__ 后', md), '前 粗 后');
+  assert.equal(cleanText('**中文粗体**', md), '中文粗体');
+  assert.equal(cleanText('这是**重点**内容', md), '这是重点内容');
+  assert.equal(cleanText('**加粗**和*斜体*', md), '加粗和斜体');
+  assert.equal(cleanText('__中文下划线粗体__', md), '中文下划线粗体');
+});
+
+test('remove_markdown handles a URL containing balanced parentheses', () => {
+  // `[^)]*` 在**第一个** `)` 就停，于是维基百科那种带括号的链接会漏出一个 `)`，
+  // 被念成「右括号」。实测 4/4 都残留：
+  //   见 [铝](https://zh.wikipedia.org/wiki/铝_(元素))  -> 见 铝)
+  // 维基链接是最常见来源，所以这不是边角情况。CommonMark 允许 URL 里有配平括号，
+  // 因此这是**可判定**的，不是 markdown 的歧义。
+  const md = { remove_markdown: true };
+  assert.equal(cleanText('见 [铝](https://zh.wikipedia.org/wiki/铝_(元素))', md), '见 铝');
+  assert.equal(cleanText('参考 [Foo](https://en.wikipedia.org/wiki/Foo_(bar))', md), '参考 Foo');
+  assert.equal(cleanText('文档 [API](https://d.com/f(x))', md), '文档 API');
+  assert.equal(cleanText('图片 ![图](https://x.com/a_(1).png)', md), '图片');
+  // 基础行为不能变。
+  assert.equal(cleanText('![alt](img.png)', md), '');
+  assert.equal(cleanText('[docs](url)', md), 'docs');
+  assert.equal(cleanText('[嵌]([内])', md), '嵌');
+  assert.equal(cleanText('[未闭合(x', md), '[未闭合(x');
+});
+
+test('remove_markdown requires matching backtick counts', () => {
+  // `{1,3}` 首尾数量可以不同，于是 `` `a``b` `` 被贪婪地吃成 "ab`"，留一个反引号被念出来。
+  // 改用反向引用 \1 要求首尾一致。顺带更快：无需回溯探测（最坏合法请求的清理耗时
+  // 从 0.56ms 降到 0.34ms）。
+  const md = { remove_markdown: true };
+  assert.equal(cleanText('用 `a``b` 表示', md), '用 ab 表示');
+  assert.equal(cleanText('`code`', md), 'code');
+  assert.equal(cleanText('```block```', md), 'block');
+  assert.equal(cleanText('``双``', md), '双');
+  assert.equal(cleanText('`未闭合', md), '`未闭合');
+});
+
+test('the markdown fixes stay linear on adversarial input', () => {
+  // 新引入的三条正则各自的攻击形状。这个项目曾因 `\[(.*?)\]\(.*?\)` 在 16KB 输入上跑到
+  // 36 秒（Workers 的 CPU 上限是 10ms），所以每次动这些正则都必须重测复杂度。
+  // 实测新正则在 297KB 混合最坏输入下 1.9ms，随长度线性。
+  const md = { remove_markdown: true };
+  const budget = 1500; // 与 redos.test.mjs 同一个宽松预算：跨机器可移植
+  const attacks = {
+    'balanced-paren URL': '[a](()'.repeat(4000),
+    'open parens in URL': '[a](' + '('.repeat(16000) + ')',
+    'backtick run': '`'.repeat(16000),
+    'dense __': ' __a'.repeat(16000),
+    'dense **': '**a'.repeat(16000),
+    'mixed worst case': '[a](()`b`__c__**d**'.repeat(4000),
+  };
+  for (const [name, payload] of Object.entries(attacks)) {
+    const t0 = process.hrtime.bigint();
+    cleanText(payload, md);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(
+      ms < budget,
+      `${name}: ${payload.length} chars took ${ms.toFixed(0)}ms (budget ${budget}ms) — ` +
+        'a markdown regex is backtracking again'
+    );
+  }
+});
+
+test('remove_markdown keeps asterisks inside expressions and identifiers', () => {
+  // 与 __ 同源的缺陷，但在 `**` 和单 `*` 上。加 \w 边界后救回的都是真实写法：
+  //   2*3*4 -> 234          a*b*c -> abc
+  //   x**2**y -> x2y        file**name**.txt -> filename.txt
+  //
+  // 关键认知（我一开始搞错了）：JS 的 `\w` **只等价 [A-Za-z0-9_]**，中文字符不在其中，
+  // 所以加 \w 边界对中文强调**零影响**。我原本以为「中文没有词边界，加了会打破中文粗体」，
+  // 是变异测试发现注释与代码不符时才查出来的 —— /\w/.test('重') === false。
+  const md = { remove_markdown: true };
+  assert.equal(cleanText('结果是 2*3*4', md), '结果是 2*3*4');
+  assert.equal(cleanText('面积 a*b*c', md), '面积 a*b*c');
+  assert.equal(cleanText('x**2**y', md), 'x**2**y');
+  assert.equal(cleanText('file**name**.txt', md), 'file**name**.txt');
+  assert.equal(cleanText('val**exp**base', md), 'val**exp**base');
+});
+
+test('remove_markdown still strips emphasis around CJK text after adding word boundaries', () => {
+  // 上一条的风险面。中文没有空格分词，所以必须确认边界规则没把中文强调一起挡掉。
+  const md = { remove_markdown: true };
+  assert.equal(cleanText('**中文粗体**', md), '中文粗体');
+  assert.equal(cleanText('*中文斜体*', md), '中文斜体');
+  assert.equal(cleanText('这是**重点**内容', md), '这是重点内容');
+  assert.equal(cleanText('这是*重点*内容', md), '这是重点内容');
+  assert.equal(cleanText('**加粗**和*斜体*', md), '加粗和斜体');
+  // 英文强调同样不能坏。
+  assert.equal(cleanText('This is **bold** and *italic*', md), 'This is bold and italic');
+  // 列表符号（后跟空格）本来就不该当强调。
+  assert.equal(cleanText('* 列表项', md), '* 列表项');
+});
+
+test('the ** and * rules do not undo each other', () => {
+  // 端到端才能发现的问题：给 ** 加了边界后，`x**2**y` 被**下游的单 `*` 规则**接手，
+  // 变成了 `x*2*y` —— 修一条正则却被后一条抵消。单独测每条正则看不出来，
+  // 只有走完整条 cleanText 才会暴露。所以单 `*` 规则里也要排除 `*` 本身。
+  const md = { remove_markdown: true };
+  assert.equal(cleanText('x**2**y', md), 'x**2**y', '不能被单 * 规则接手成 x*2*y');
+  assert.equal(cleanText('a**b**c', md), 'a**b**c');
+  // 反向：真粗体不能只被剥掉一层星号。
+  assert.equal(cleanText('**bold**', md), 'bold');
+  assert.ok(!cleanText('**bold**', md).includes('*'), '不能留下残星号');
+});

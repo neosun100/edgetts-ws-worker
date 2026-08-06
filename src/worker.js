@@ -1486,15 +1486,42 @@ function cleanText(text, options) {
     // 而 Workers 的 CPU 上限是 10ms —— 一个远小于 MAX_BODY_BYTES 的请求就能打爆 Worker。
     // 换成 [^\]]* / [^)]* 后引擎无法跨越定界符扩张，16KB 从 36156ms 降到 42ms（863 倍），
     // 且对合法 Markdown 的输出逐例一致（见 test/unit/redos.test.mjs 的等价性断言）。
-    cleanedText = cleanedText.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
-    cleanedText = cleanedText.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
-    cleanedText = cleanedText.replace(/(\*\*|__)(.*?)\1/g, "$2");
-    // Single * / _ emphasis. The underscore form requires non-word boundaries so it
-    // doesn't eat delimiters inside snake_case identifiers (my_func_name → my_func_name).
-    cleanedText = cleanedText.replace(/\*(?!\s)(.+?)\*/g, "$1");
+    // URL 部分允许**一层配平括号**：`[^)]*` 会在第一个 `)` 就停，于是
+    // `[铝](https://zh.wikipedia.org/wiki/铝_(元素))` 只吃到 `..._(元素`，
+    // 剩下的 `)` 漏出来被念成「右括号」—— 维基百科链接是最常见来源，实测 4/4 都残留。
+    // `(?:[^()]|\([^()]*\))*` 表示「非括号字符，或一整对不含嵌套的括号」，仍是线性的
+    // （每个位置只有一种匹配方式，没有可回溯的歧义），不引入 ReDoS。
+    // 一层就够：CommonMark 的裸 URL 里两层以上括号极罕见，而层数无上限的写法要用递归。
+    const URL_PART = "\\((?:[^()]|\\([^()]*\\))*\\)";
+    cleanedText = cleanedText.replace(new RegExp("!\\[[^\\]]*\\]" + URL_PART, "g"), "");
+    cleanedText = cleanedText.replace(new RegExp("\\[([^\\]]*)\\]" + URL_PART, "g"), "$1");
+    // ** 与 __ 分开处理，且**两条都要 \w 边界**。原来共用 /(\*\*|__)(.*?)\1/，于是两者都
+    // 拿不到保护，而下面单 `_` 那条早就有了 —— 同一份代码对同类输入两种待遇，这是漏了。
+    // 实测受害的都是真实文本：
+    //   my__temp__value -> mytempvalue    MAX__SIZE__LIMIT -> MAXSIZELIMIT
+    //   x**2**y         -> x2y            file**name**.txt -> filename.txt
+    //
+    // 加 \w 边界对**中文粗体零影响**，因为 JS 的 `\w` 只等价 [A-Za-z0-9_]，中文字符不在其中
+    // （实测 /\w/.test("重") === false）。我一度以为「中文没有词边界，加了会打破中文粗体」，
+    // 那是错的 —— 变异测试发现这条注释与代码不符时才查出来：把边界加上，
+    // `这是**重点**内容` 依然正确得到 `这是重点内容`。
+    //
+    // 已知残留歧义：`__init__ 方法`（前后都是空格）与真粗体 `__粗体__` 在语法上**无法区分**，
+    // 仍会被当粗体处理。这是 markdown 本身的歧义，不是可修的 bug —— CommonMark 也这么判。
+    // 同理 `**a**b**c**` 这种连续写法只处理首尾一组。
+    cleanedText = cleanedText.replace(/(^|[^\w])\*\*(?!\s)(.+?)\*\*(?![\w])/g, "$1$2");
+    cleanedText = cleanedText.replace(/(^|[^\w])__(?!\s)([^_]+)__(?![\w])/g, "$1$2");
+    // 单 `*` 与单 `_` 同样要 \w 边界，理由与上面 **/__ 一致，且这条能救回**算式与标识符**：
+    //   2*3*4 -> 234（乘法被当斜体）    a*b*c -> abc
+    // 中文斜体不受影响（中文不是 \w）：`这是*重点*内容` 仍得到 `这是重点内容`。
+    // 也排除 `*` 本身，避免与上面的 ** 规则相互啃咬 —— 这是端到端验证才发现的：
+    // 给 ** 加边界后 `x**2**y` 被这条接手成了 `x*2*y`，修一条却被下一条抵消。
+    cleanedText = cleanedText.replace(/(^|[^\w*])\*(?!\s)([^*]+)\*(?![\w*])/g, "$1$2");
     // 同上：(.+?) 换成 ([^_]+)，否则 " _a" 重复 N 次时 48KB 要 322ms。
     cleanedText = cleanedText.replace(/(^|[^\w])_(?!\s)([^_]+)_(?![\w])/g, "$1$2");
-    cleanedText = cleanedText.replace(/`{1,3}(.*?)`{1,3}/g, "$1");
+    // 首尾反引号数量必须**一致**（反向引用 \1），否则 `` `a``b` `` 会被贪婪地吃成 "ab`"，
+    // 留一个反引号被念出来。实测 `用 `a``b` 表示` -> `用 ab` 表示`。
+    cleanedText = cleanedText.replace(/(`{1,3})([^`]*)\1/g, "$2");
     cleanedText = cleanedText.replace(/#{1,6}\s/g, "");
   }
   if (options.remove_urls) {
