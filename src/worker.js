@@ -1498,9 +1498,19 @@ function cleanText(text, options) {
     cleanedText = cleanedText.replace(/#{1,6}\s/g, "");
   }
   if (options.remove_urls) {
+    // 脏数据来源：LLM 输出、网页正文、聊天记录粘贴 —— 这些是本服务最主要的输入。
+    // 裸 URL 念出来是「h-t-t-p-s 冒号 斜杠 斜杠…」几十秒噪音，用户几乎从不想听。
+    // 只吃 http(s)：`www.x.com` 这类无协议前缀的写法读起来是正常单词，不该删。
     cleanedText = cleanedText.replace(/(https?:\/\/[^\s]+)/g, "");
   }
   if (options.custom_keywords) {
+    // 脏数据来源：调用方自己的模板噪音 —— 典型是「本文由 AI 生成」「点赞关注」「广告」
+    // 这类每篇都出现、又不该念的固定串。所以由调用方给列表，服务端不猜。
+    // filter((k) => k) 挡的是空串：`"a,,b"` 或 `" , "` 会产生空项，拼出 `/a||b/` ——
+    // 中间那个空分支在**每个位置都先匹配成功**，于是后面的分支被遮蔽、永远轮不到。
+    // 实测 `"banana".replace(/a||b/g, "")` 得到 `"bnn"`（b 没被删），而正确的
+    // `/a|b/g` 得到 `"nn"`。因为替换成空串，肉眼看不出「少删了」，只有逐例比对才发现 ——
+    // 用 `-` 替换就能看清空分支的存在：`"hello".replace(/a||b/g, "-")` = `"-h-e-l-l-o-"`。
     const keywords = options.custom_keywords.split(",").map((k) => k.trim()).filter((k) => k);
     if (keywords.length > 0) {
       const escapedKeywords = keywords.map(
@@ -1511,12 +1521,45 @@ function cleanText(text, options) {
     }
   }
   if (options.remove_emoji) {
+    // 两条规则，缺一不可：
+    //
+    // 1. `\p{Emoji_Presentation}` —— 默认就以图形呈现的 emoji（😀 ✅ 👍🏽 👨‍👩‍👧）。
+    // 2. `\p{Extended_Pictographic}️` —— **默认是文本样式、靠 VS16(U+FE0F) 变成
+    //    emoji** 的那批。它们不在 Emoji_Presentation 里，所以此前会残留下来被念出来：
+    //    实测「我❤️你」清理后仍是「我❤️你」，「天气☀️晴」仍带 ☀️。
+    //
+    // 为什么不干脆整个换成 `\p{Extended_Pictographic}`：那会连 **© 和 ™ 一起删掉**
+    // （实测两者 Extended_Pictographic=true、Emoji_Presentation=false）。它们是正常文本，
+    // 「©2026」念成「2026」是另一种数据损坏 —— 拿一个 bug 换另一个 bug 不算修好。
+    // 加 `️` 限定后，只命中「明确被标记为要当 emoji 显示」的那些。
+    //
+    // VS16 规则要放在前面：先吃掉「图形+VS16」的整体，再让规则 1 处理剩下的，
+    // 否则 Emoji_Presentation 那条可能先删掉基字符、留下一个孤立的 U+FE0F。
+    cleanedText = cleanedText.replace(/\p{Extended_Pictographic}️/gu, "");
     cleanedText = cleanedText.replace(/\p{Emoji_Presentation}/gu, "");
   }
   if (options.remove_citation_numbers) {
-    cleanedText = cleanedText.replace(/\s\d{1,2}(?=[.。，,;；:：]|$)/g, "");
+    // 目标是「如前所述 1。」这类**引用编号**：一个空格 + 1-2 位数字 + 紧跟标点。
+    //
+    // 原来的 `(?=[.。，,;；:：]|$)` 把 ASCII 句点也算作结束标点，于是分不清「句号」和
+    // 「小数点」—— " 3.14159" 里的 " 3" 后面紧跟 "."，被当成编号删掉，只剩 ".14159"。
+    // 实测 7/7 个含小数的句子被破坏：
+    //   圆周率 3.14159 -> 圆周率.14159      价格 12.50 元 -> 价格.50 元
+    //   温度 36.5 度   -> 温度.5 度         涨了 8.5%     -> 涨了.5%
+    // 用户听到「点一四一五九」而不是「三点一四一五九」，而响应是 200 + 合法音频，
+    // 数字却是错的 —— 又一个静默失败。而 `removeCitation` 是 **UI 默认开启**的。
+    //
+    // 修法：ASCII 句点后面**不能紧跟数字**（那是小数），全角句号 `。` 不受影响
+    // （它不做小数点，`36。5` 不是合法写法）。逗号同理：`1,234` 是千分位分隔符。
+    cleanedText = cleanedText.replace(
+      /\s\d{1,2}(?=。|[.](?![0-9])|[,](?![0-9])|[，;；:：]|$)/g,
+      ""
+    );
   }
   if (options.remove_line_breaks) {
+    // 脏数据来源：PDF / 代码块 / 邮件引用里的硬换行，以及上面几条清理留下的连续空白
+    // （删掉 URL 或图片后原地会留下空隙）。上游把换行当停顿处理，逐行朗读会变得断断续续。
+    // 必须放在**最后**：前面每一条清理都可能产生新的连续空白，先归一化就白做了。
     cleanedText = cleanedText.replace(/\s+/g, " ");
   }
   return cleanedText.trim();
