@@ -191,3 +191,74 @@ describe('e2e: real synthesis against a deployed Worker', { timeout: 300_000 }, 
     assert.equal(body.error?.code, 'invalid_response_format');
   });
 });
+
+// ------------------------------------------------------ 全音色普查得出的两条结论
+// 来源：docs/research/empty-audio-sweep-20260806.md（约 420 次真实上游调用）
+//
+// 这两条是写进双语 README 的**产品行为宣称**，需要测试防它们悄悄变假。
+// 与本文件其他测试一样，需要 EDGETTS_E2E=1 且能访问已部署服务，否则整组 skip。
+describe('e2e: 空音频规律（全音色普查结论）', { timeout: 300_000 }, () => {
+  /** 任意 input + voice 打一次生产，返回 status 与字节。 */
+  async function speak(input, voice) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (API_KEY) headers['Authorization'] = `Bearer ${API_KEY}`;
+    const res = await fetch(`${BASE_URL}/v1/audio/speech`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ input, voice }),
+      signal: AbortSignal.timeout(NET_TIMEOUT_MS),
+    });
+    return { status: res.status, bytes: new Uint8Array(await res.arrayBuffer()) };
+  }
+
+  it('单语音色遇到覆盖不到的书写系统 → 502 upstream_empty_audio', { skip: SKIP }, async () => {
+    // 普查实测：9×9 交叉矩阵里 62/90 组合是空音频，且**同书写系统 0 失败**。
+    // 规律是「文本书写系统 ≠ 音色书写系统」，而不是「语种不同」——
+    // zh-CN 音色读英文完全正常（拉丁列对所有音色都有输出），所以那不是判据。
+    const cases = [
+      ['你好世界，这是测试。', 'en-US-AvaNeural', '中文 → 拉丁语系音色'],
+      ['こんにちは、テストです。', 'en-US-AvaNeural', '日文 → 拉丁语系音色'],
+      ['שלום, זהו משפט בדיקה.', 'zh-CN-XiaoxiaoNeural', '希伯来文 → 中文音色'],
+    ];
+    for (const [input, voice, label] of cases) {
+      const { status, bytes } = await speak(input, voice);
+      assert.equal(status, 502, `${label}：必须拒绝，不能把空音频当成功透传`);
+      const body = JSON.parse(new TextDecoder().decode(bytes));
+      assert.equal(body.error.code, 'upstream_empty_audio', label);
+      assert.equal(body.error.param, 'voice', `${label}：要指出可改的字段`);
+    }
+  });
+
+  it('Multilingual 音色通吃书写系统；拉丁文本对任何音色都有输出', { skip: SKIP }, async () => {
+    // 交叉矩阵的两个例外，也是 README 那条「怎么选音色」建议的依据：
+    // Multilingual 行 9/9 全部有音频；Latin 列对全部 10 个受测音色都有音频。
+    const cases = [
+      ['你好世界，这是测试。', 'en-US-AvaMultilingualNeural', 'Multilingual 读中文'],
+      ['שלום, זהו משפט בדיקה.', 'en-US-AvaMultilingualNeural', 'Multilingual 读希伯来文'],
+      ['Hello, this is a test.', 'zh-CN-XiaoxiaoNeural', '拉丁文本 → 中文音色'],
+      ['Hello, this is a test.', 'ta-IN-PallaviNeural', '拉丁文本 → 泰米尔音色'],
+    ];
+    for (const [input, voice, label] of cases) {
+      const { status, bytes } = await speak(input, voice);
+      assert.equal(status, 200, `${label}：应返回音频`);
+      assert.ok(bytes.byteLength > 1000, `${label}：音频过小，实得 ${bytes.byteLength} 字节`);
+    }
+  });
+
+  it('每个音色都能合成自己语种的文本（普查 322/322 通过的抽样）', { skip: SKIP }, async () => {
+    // 全量 322 次不适合放进常规 e2e（约 3 分钟 + 322 次上游调用），
+    // 这里抽取普查里我一度误判为「失败」的那几个语言 —— 它们各有自己的字母，
+    // 是最容易因为探测文本给错而误报的一组。
+    const cases = [
+      ['வணக்கம், இது ஒரு சோதனை வாக்கியம்.', 'ta-IN-PallaviNeural', '泰米尔文 → 泰米尔音色'],
+      ['হ্যালো, এটি একটি পরীক্ষার বাক্য।', 'bn-IN-TanishaaNeural', '孟加拉文 → 孟加拉音色'],
+      ['שלום, זהו משפט בדיקה.', 'he-IL-HilaNeural', '希伯来文 → 希伯来音色'],
+      ['မင်္ဂလာပါ၊ ဤသည်စမ်းသပ်ဝါကျဖြစ်သည်။', 'my-MM-NilarNeural', '缅甸文 → 缅甸音色'],
+    ];
+    for (const [input, voice, label] of cases) {
+      const { status, bytes } = await speak(input, voice);
+      assert.equal(status, 200, `${label}：音色必须能读自己的文字`);
+      assert.ok(bytes.byteLength > 1000, `${label}：实得 ${bytes.byteLength} 字节`);
+    }
+  });
+});

@@ -162,7 +162,10 @@ with `bytes: 0` instead.
 Lists the available voices (322) in an OpenAI-models-like shape. Both endpoints accept
 the same query filters:
 
-- `?multilingual=true` — only the multilingual voices (12 of 322).
+- `?multilingual=true` — only the multilingual voices (12 of 322). **These are the ones to use
+  when the text's script may vary**: swept live, all 12 produce audio for every one of 9 writing
+  systems, while a single-language voice returns empty audio for anything outside its own script
+  (62 of 90 cross-script combinations — see [the sweep](docs/research/empty-audio-sweep-20260806.md)).
 - `?neural=true` — accepted for backward compatibility, but a **no-op**: every voice
   upstream is already a Neural voice, so nothing is filtered out.
 

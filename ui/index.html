@@ -960,7 +960,8 @@
                 <option value="Male">♂ 男声</option>
               </select>
               <label class="vf-check" title="多语言音色可跨语种朗读，中英混排不出戏">
-                <input type="checkbox" v-model="voiceFilter.multilingualOnly" /> 🌏 仅多语言
+                <input type="checkbox" v-model="voiceFilter.multilingualOnly" />
+                <span title="多语言音色能朗读任意书写系统的文本。普通音色遇到自己覆盖不到的文字会返回空音频（服务端已拦为 502）—— 实测 9 种书写系统交叉矩阵里，62/90 组合是空的，而多语言音色 9/9 全部有输出。">🌏 仅多语言</span>
               </label>
             </div>
           </div>
