@@ -817,3 +817,109 @@ test('the voice picker is usable by keyboard and announced as a radio group', { 
   // Unowned keys must pass through, or typing in the search box would break.
   assert.equal(out.defaultPrevented, false, 'an unrelated key is not swallowed');
 });
+
+test('a slider value stays visually attached to its own slider at every width', { skip: SKIP }, async () => {
+  // Reported from a screenshot: at a wide viewport the pitch value "1.00" sat right against
+  // the output-format dropdown and read as if it labelled the dropdown.
+  //
+  // The cause was proximity, not overflow. The value used to live to the RIGHT of its slider
+  // inside .slider-group, and the grid is `auto-fit minmax(200px, 1fr)`. Measured at 1242px:
+  // the value was 18px from its own slider and 24px from the next column — near enough to
+  // equidistant that Gestalt proximity no longer expressed ownership. Nothing overflowed, so
+  // no clipping check would have caught it, and it got worse the narrower each column became.
+  //
+  // The value now sits on the label row, sharing a container boundary with the label it
+  // belongs to, which makes ownership a property of the layout rather than of the column width.
+  //
+  // Asserted here as containment plus a proximity ORDER: the value must be closer to its own
+  // slider than to the neighbouring column. That is the property that actually broke; a pure
+  // containment check passes on the buggy version too (it never overflowed).
+  const widths = [1600, 1242, 1000, 900, 820, 700, 480, 360];
+  for (const width of widths) {
+    await chrome.page.send('Emulation.setDeviceMetricsOverride', {
+      width, height: 900, deviceScaleFactor: 1, mobile: false,
+    });
+    const out = await chrome.page.evaluate(`(() => {
+      const grid = document.querySelector('.grid-layout');
+      const box = (el) => { const b = el.getBoundingClientRect();
+        return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width }; };
+      const cells = [...grid.querySelectorAll(':scope > .form-group')];
+      const rows = cells.filter((c) => c.querySelector('.slider-value')).map((cell) => {
+        const value = box(cell.querySelector('.slider-value'));
+        const range = box(cell.querySelector('input[type=range]'));
+        const own = box(cell);
+        // The nearest cell edge to the right of this one, if the grid put anything there.
+        const neighbour = cells
+          .map(box)
+          .filter((b) => b.left >= own.right - 1 && Math.abs(b.top - own.top) < own.width)
+          .sort((a, b) => a.left - b.left)[0] || null;
+        return {
+          label: cell.querySelector('label').textContent.trim(),
+          value, range, own,
+          neighbourLeft: neighbour ? neighbour.left : null,
+        };
+      });
+      return JSON.stringify({ width: innerWidth, rows });
+    })()`);
+    const { width: vw, rows } = JSON.parse(out);
+    assert.ok(rows.length >= 2, vw + 'px: both slider rows were found');
+
+    for (const r of rows) {
+      const where = `${vw}px / ${r.label}`;
+      // 1. Containment. Necessary but NOT sufficient — it held before the fix too.
+      assert.ok(
+        r.value.left >= r.own.left - 1 && r.value.right <= r.own.right + 1,
+        `${where}: the value escaped its own grid cell`
+      );
+      // 2. Ownership by proximity. The value shares the label row, so it is vertically
+      //    adjacent to its slider and cannot be nearer to a different column's control.
+      if (r.neighbourLeft !== null) {
+        const gapToNeighbour = r.neighbourLeft - r.value.right;
+        const gapToOwnSlider = Math.abs(r.range.top - r.value.bottom);
+        assert.ok(
+          gapToOwnSlider < gapToNeighbour,
+          `${where}: the value is ${gapToOwnSlider.toFixed(0)}px from its own slider but ` +
+            `${gapToNeighbour.toFixed(0)}px from the next column — it reads as labelling ` +
+            'the wrong control. This is the reported bug.'
+        );
+      }
+      // 3. The slider gets the column, rather than surrendering a third of it to the value.
+      assert.ok(
+        r.range.width > r.own.width * 0.9,
+        `${where}: the slider track is only ${Math.round((r.range.width / r.own.width) * 100)}% ` +
+          'of its column; the value should not be taking horizontal space from it'
+      );
+    }
+  }
+
+  // Leave the viewport as the other tests expect it.
+  await chrome.page.send('Emulation.clearDeviceMetricsOverride');
+});
+
+test('clicking a slider label focuses its slider', { skip: SKIP }, async () => {
+  // Fell out of the layout fix: the labels had no `for`, so they were decorative text. Now
+  // each is bound to its input, which is what lets a screen reader announce "语速, slider"
+  // and gives a click target beyond the 6px-tall track itself.
+  const out = await chrome.page.evaluate(`(() => {
+    const results = [];
+    for (const label of document.querySelectorAll('.slider-label-row label')) {
+      const target = document.getElementById(label.htmlFor);
+      if (!target) { results.push({ for: label.htmlFor, resolved: false }); continue; }
+      label.click();
+      results.push({
+        for: label.htmlFor,
+        resolved: true,
+        focused: document.activeElement === target,
+        type: target.type,
+      });
+    }
+    return JSON.stringify(results);
+  })()`);
+  const rows = JSON.parse(out);
+  assert.equal(rows.length, 2, 'both slider labels were checked');
+  for (const r of rows) {
+    assert.equal(r.resolved, true, `label for="${r.for}" must resolve to a real element`);
+    assert.equal(r.type, 'range', `${r.for} is the range input`);
+    assert.equal(r.focused, true, `clicking the label must focus ${r.for}`);
+  }
+});

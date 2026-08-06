@@ -525,6 +525,32 @@
       gap: 1.5rem;
     }
 
+    /* 数值放在 label 同一行的右端,而不是滑轨右侧。
+       原因(实测 1242px):滑轨右侧的数值离自己的滑轨 18px、离右边那一列 24px —— 两个距离
+       几乎相等,邻近性就不再表达归属,「音调」的 1.00 紧贴「输出格式」的下拉,读起来像
+       是在标注下拉框。栅格是 auto-fit minmax(200px),列一窄这个歧义就必然出现。
+       挪到 label 行后,数值与它的 label 同处一行、共享容器边界,归属由布局本身决定,
+       与列宽无关;滑轨也拿回整列宽度。这与页面已有的 .label-with-controls 是同一模式。 */
+    .slider-label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .slider-label-row label {
+      margin-bottom: 0;
+    }
+
+    .slider-value {
+      font-weight: 600;
+      color: var(--primary-color);
+      font-size: 0.9rem;
+      /* 等宽数字:拖动时 1.00 -> 1.05 各字形宽度一致,数值不会左右跳动 */
+      font-variant-numeric: tabular-nums;
+    }
+
     .slider-group {
       display: flex;
       align-items: center;
@@ -560,13 +586,6 @@
       border: none;
     }
 
-    .slider-group span {
-      font-weight: 500;
-      min-width: 50px;
-      text-align: right;
-      color: var(--primary-color);
-      font-size: 0.9rem;
-    }
 
     .button-group {
       display: grid;
@@ -758,8 +777,7 @@
         grid-template-columns: 1fr;
       }
 
-      .slider-group span {
-        min-width: 45px;
+      .slider-value {
         font-size: 0.85rem;
       }
 
@@ -978,17 +996,21 @@
           </div>
         </div>
         <div class="form-group">
-          <label>语速</label>
+          <div class="slider-label-row">
+            <label for="speed-range">语速</label>
+            <output class="slider-value" for="speed-range" v-cloak>{{ speedDisplay }}</output>
+          </div>
           <div class="slider-group">
-            <input type="range" v-model.number="form.speed" @input="saveForm" min="0.25" max="2.0" step="0.05" />
-            <span v-cloak>{{ speedDisplay }}</span>
+            <input id="speed-range" type="range" v-model.number="form.speed" @input="saveForm" min="0.25" max="2.0" step="0.05" />
           </div>
         </div>
         <div class="form-group">
-          <label>音调</label>
+          <div class="slider-label-row">
+            <label for="pitch-range">音调</label>
+            <output class="slider-value" for="pitch-range" v-cloak>{{ pitchDisplay }}</output>
+          </div>
           <div class="slider-group">
-            <input type="range" v-model.number="form.pitch" @input="saveForm" min="0.5" max="1.5" step="0.05" />
-            <span v-cloak>{{ pitchDisplay }}</span>
+            <input id="pitch-range" type="range" v-model.number="form.pitch" @input="saveForm" min="0.5" max="1.5" step="0.05" />
           </div>
         </div>
         <div class="form-group">
