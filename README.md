@@ -230,6 +230,36 @@ the wrong thing. Two cases worth naming:
 | `API_KEY` | secret | Bearer token required for `/v1/audio/speech`. **Without it the Worker returns 503** rather than serving unauthenticated traffic. |
 | `ALLOW_ANONYMOUS` | var | Set to `"true"` to intentionally run open (no key). |
 
+### The built-in web UI is for trusted environments
+
+The UI at `/` keeps the API key you type into it in `localStorage`, in plain text. Any script
+running on the same origin can read it. That is a deliberate trade-off, not an oversight, and
+it is stated here so the decision is yours rather than a surprise:
+
+- **Use the UI on a machine and browser you control.** It is a convenience front-end for your
+  own key, in the same category as a `curl` command in your shell history.
+- **Do not hand the UI's URL to untrusted users as a way to share access.** They would be
+  typing your key into their own browser's storage. Issue keys per consumer and let them call
+  `POST /v1/audio/speech` directly instead.
+- **Do not embed this page in a context where third-party script runs** (an ad slot, a tag
+  manager, a browser extension you did not audit).
+
+What has been closed off, so the remaining risk is scoped accurately:
+
+- The one third-party script the page loads (Vue) is **pinned to an exact version with an SRI
+  hash**, so a compromised CDN cannot substitute a key-stealing build. Verified live: SRI
+  active, page renders all 322 voices.
+- The UI's own injection surface is nil — measured 0 occurrences each of `v-html`,
+  `innerHTML =`, and `eval`.
+- Values read back from `localStorage` are type-checked field by field rather than spread over
+  the defaults, so a tampered entry degrades to the default instead of breaking the page.
+
+The alternative — a backend session with a same-origin cookie and the key held server-side —
+was considered and **not** adopted. It conflicts with the point of this project: anyone can
+deploy their own copy in a single `wrangler deploy`, and requiring a session store would add a
+dependency to that path. Serving the key to the browser is the cost of that simplicity, and
+the boundary is documented rather than hidden.
+
 ### Length limits
 
 Request bodies are capped at 256KB (413 `payload_too_large`) and `input` at 50000

@@ -211,3 +211,73 @@ test('LIMITS are internally consistent', () => {
   assert.ok(LIMITS.MIN_CONCURRENCY < LIMITS.MAX_CONCURRENCY);
   assert.ok(LIMITS.MIN_CHUNK_SIZE < LIMITS.MAX_CHUNK_SIZE);
 });
+
+test('the documented "trusted environments only" claims are all still true', () => {
+  // README/README_CN now state, as the resolution of ROADMAP P1-3, that the UI keeps the API
+  // key in localStorage and that three specific mitigations bound the risk. A security note
+  // that quietly stops being true is worse than no note: a reader would keep making the same
+  // deployment decision on stale grounds. Each claim is checked against the source here.
+  const ui = readFileSync(new URL('../../ui/index.html', import.meta.url), 'utf8');
+
+  // 1. "the UI's own injection surface is nil — 0 each of v-html, innerHTML =, eval"
+  const surfaces = {
+    'v-html': (ui.match(/v-html/g) || []).length,
+    'innerHTML =': (ui.match(/innerHTML\s*=/g) || []).length,
+    'eval(': (ui.match(/[^.\w]eval\(/g) || []).length,
+  };
+  for (const [name, count] of Object.entries(surfaces)) {
+    assert.equal(
+      count,
+      0,
+      `the READMEs claim 0 occurrences of ${name}, found ${count}. Either remove the usage or ` +
+        'correct the security note — the key in localStorage is readable by any same-origin script.'
+    );
+  }
+
+  // 2. "pinned to an exact version with an SRI hash". A floating major (vue@3) would silently
+  //    adopt any newly published build, and unpkg only caches that redirect for 60s.
+  const script = /<script\s+src="(https:\/\/unpkg\.com\/vue@[^"]+)"([^>]*)>/.exec(ui);
+  assert.ok(script, 'the Vue script tag must be findable to be checked');
+  const [, src, attrs] = script;
+  assert.match(src, /vue@\d+\.\d+\.\d+\//, 'Vue must be pinned to an exact patch version, got ' + src);
+  assert.match(attrs, /integrity="sha384-[A-Za-z0-9+/=]{40,}"/, 'the Vue tag must carry an SRI hash');
+  // Without crossorigin the browser cannot verify the hash at all, so SRI silently does nothing.
+  assert.match(attrs, /crossorigin="anonymous"/, 'SRI requires crossorigin to be enforced');
+
+  // 3. "values read back from localStorage are type-checked field by field rather than spread
+  //    over the defaults". Both stores must be guarded — tts_config was missed the first time
+  //    round, and it is the one holding the key.
+  assert.ok(
+    !/\.\.\.this\.config,\s*\.\.\.JSON\.parse/.test(ui),
+    'tts_config must not be shallow-spread from localStorage: a non-string apiKey overwrites ' +
+      "the '' default and generateSpeech()'s .trim() throws as an uncaught rejection"
+  );
+  assert.ok(
+    !/\.\.\.this\.form,\s*\.\.\.JSON\.parse/.test(ui),
+    'tts_form must not be shallow-spread from localStorage (see mergeSavedForm)'
+  );
+});
+
+test('both READMEs carry the trusted-environment boundary, not just a vague warning', () => {
+  // The point of P1-3's resolution is that a deployer can act on it. That needs the mechanism
+  // (localStorage, plain text, same-origin readable) and the recommendation — a bare
+  // "be careful" would leave them exactly where they started.
+  for (const file of ['README.md', 'README_CN.md']) {
+    const text = readFileSync(new URL('../../' + file, import.meta.url), 'utf8');
+    assert.match(text, /localStorage/, file + ': must name where the key is kept');
+    assert.ok(
+      /trusted environments|受信任环境/.test(text),
+      file + ': must state the trusted-environment boundary'
+    );
+    assert.ok(
+      /plain text|明文/.test(text),
+      file + ': must be explicit that the key is not encrypted'
+    );
+    // The rejected alternative is part of the decision: it stops the question being reopened
+    // from scratch, and tells a reader who DOES need it what to build.
+    assert.ok(
+      /backend session|后端会话/.test(text),
+      file + ': must record that a backend session was considered and why it was not adopted'
+    );
+  }
+});

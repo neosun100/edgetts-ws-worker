@@ -1318,7 +1318,22 @@
           try {
             const saved = localStorage.getItem('tts_config');
             if (saved) {
-              this.config = { ...this.config, ...JSON.parse(saved) };
+              // 逐字段按类型取，不用 { ...this.config, ...parsed } 浅展开。
+              // 同一个形状的 bug 已经在 tts_form 上修过一次(见 mergeSavedForm)，但 tts_config
+              // 漏了 —— 而它存的正是 baseUrl 与 API key。浅展开会让 localStorage 里的
+              // 任意类型直接盖掉字符串默认值，随后 generateSpeech() 里的 .trim() 抛
+              // 「apiKey.trim is not a function」。实测：把 apiKey 改成 null / 42 / [1,2]
+              // 之后点「生成语音」，抛的是**未捕获**异常，页面既不报错也不动 —— 用户看到的
+              // 是按钮点了没反应，最难查的那种。
+              // config 的每个字段都是字符串(baseUrl / apiKey)，所以这里只收字符串。
+              // 刻意不写成通用的「typeof parsed[k] === typeof this.config[k]」：那样一旦
+              // 以后有字段的默认值是对象，typeof null 也是 'object'，null 就会通过。
+              const parsed = JSON.parse(saved);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                for (const key of Object.keys(this.config)) {
+                  if (typeof parsed[key] === 'string') this.config[key] = parsed[key];
+                }
+              }
               if (this.config.baseUrl.endsWith('/')) {
                 this.config.baseUrl = this.config.baseUrl.slice(0, -1); // 去除末尾的斜杠
               }

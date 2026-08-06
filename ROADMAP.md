@@ -119,18 +119,31 @@ voice = `x"><prosody rate="-100%">INJECTED</prosody></voice><voice name="y`
 
 ## P1 — 建议下一步
 
-### 3. 前端 API key 存储 · 供应链面已收口（2026-08-05）
-key 明文存 `localStorage`，任何 XSS 或同源脚本可读。
+### 3. 前端 API key 存储 ✅ 已裁定（2026-08-06，Neo 决策）
 
-**已做**：实测 UI 里 `v-html` / `innerHTML=` / `eval` 各为 0，自身 XSS 面确实很小；
-但当时 Vue 是从 `unpkg.com/vue@3` 加载的**浮动版本、无 SRI**（unpkg 只缓存 60s，实测解析到
-3.5.40），那个脚本能读到这个 key —— CDN 一旦被污染 key 就随之泄漏。现已固定到 3.5.40 +
-sha384 SRI + crossorigin，线上验证 SRI 生效且页面正常（322 音色）。
+key 明文存 `localStorage`，任何同源脚本可读。**裁定：文档化边界，不改后端会话。**
 
-**仍未做**（需要产品决策，不是纯技术问题）：
-- 要么改为后端会话（同源 cookie + 服务端持有 key）—— 但这与「开放访问、任何人可自部署」
-  的定位有张力
-- 要么明确文档化「此 UI 仅供受信任环境使用」
+理由：后端会话（同源 cookie + 服务端持有 key）与本项目的立足点冲突 —— 任何人一条
+`wrangler deploy` 就能部署副本，引入会话存储会给这条路径加依赖。把 key 交给浏览器是这份
+简洁的代价，**这个边界选择被写明，而不是被藏起来**。
+
+**已收口的三条**（双语 README 各有一节，且由 `test/unit/pure-helpers.test.mjs` 钉住）：
+- Vue 固定到 3.5.40 + sha384 SRI + `crossorigin`（缺 `crossorigin` 时 SRI 会**静默失效**，
+  所以这一项单独断言）。线上验证 SRI 生效、322 音色正常。
+- UI 自身注入面为零：`v-html` / `innerHTML =` / `eval` 实测各 0 处。
+- `localStorage` 读回值逐字段类型检查，不浅展开 —— 见下方补记。
+
+**顺带修掉一个真缺陷**：`tts_config`（存 baseUrl 与 API key）此前用的是无保护的
+`{ ...this.config, ...JSON.parse(saved) }` —— 与早先已在 `tts_form` 上修掉的是同一形状，
+但 config 漏了，而它恰好是存 key 的那个。实测把 `apiKey` 改成 `null` / `42` / `[1,2]` 后点
+「生成语音」，`generateSpeech()` 的 `.trim()` 抛**未捕获**异常，页面既不报错也不动 ——
+用户看到的是「按钮点了没反应」，最难查的那种症状。已改为逐字段只收字符串，非法值退回默认，
+落到既有校验上给出「请填写 API 配置和输入文本」。
+
+原有的 malformed-localStorage e2e **没能发现它**：那张表里 `tts_config` 只有 `{{{` 和 `[]`
+两例，而这两例本就被 `try` 与 `Array.isArray` 挡住了。真正的漏洞是**格式合法、字段类型错**，
+且它只在**点击生成时**才触发 —— 而那个测试只断言到「页面还能挂载」。现已补 7 个类型错例，
+并在每一例后真正点一次生成按钮、断言无未捕获异常。
 
 ### 4. 请求体大小上限 ✅ 已完成
 `input` 限 50000 字符外，整体请求体限 256KB。双重检查：先看 `Content-Length` 快速拒绝，

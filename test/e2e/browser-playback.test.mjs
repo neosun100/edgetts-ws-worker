@@ -713,6 +713,21 @@ test('malformed localStorage cannot break the page', { skip: SKIP }, async () =>
     ['theme: garbage', 'tts_theme', 'purple'],
     ['config: invalid JSON', 'tts_config', '{{{'],
     ['config: array', 'tts_config', '[]'],
+    // tts_config holds baseUrl and the API key, and loadConfig used a bare
+    // `{ ...this.config, ...parsed }` — the exact shape already fixed for tts_form. The two
+    // cases above never caught it, because JSON.parse throwing and Array.isArray were both
+    // already handled. The hole was WELL-FORMED JSON with wrong field types: a non-string
+    // apiKey overwrote the '' default and generateSpeech()'s .trim() threw
+    // "apiKey.trim is not a function" as an UNCAUGHT rejection — the button did nothing and
+    // the page showed no error at all. Coverage that stops at "does it still mount" cannot
+    // see that; these rows are paired with a click assertion below.
+    ['config: apiKey null', 'tts_config', '{"apiKey":null}'],
+    ['config: apiKey number', 'tts_config', '{"apiKey":42}'],
+    ['config: apiKey array', 'tts_config', '{"apiKey":[1,2]}'],
+    ['config: apiKey object', 'tts_config', '{"apiKey":{}}'],
+    ['config: baseUrl null', 'tts_config', '{"baseUrl":null,"apiKey":"k"}'],
+    ['config: baseUrl number', 'tts_config', '{"baseUrl":123,"apiKey":"k"}'],
+    ['config: both wrong', 'tts_config', '{"baseUrl":{},"apiKey":null}'],
   ];
 
   const page = chrome.page;
@@ -737,8 +752,28 @@ test('malformed localStorage cannot break the page', { skip: SKIP }, async () =>
           cleaningIsObject: !!(vm && vm.form.cleaning && typeof vm.form.cleaning === 'object'),
           inputIsString: !!(vm && typeof vm.form.inputText === 'string'),
           speedIsFinite: !!(vm && Number.isFinite(vm.form.speed)),
+          // Every config field must survive as the string type its default is, or the
+          // .trim() calls in generateSpeech() throw.
+          configAllStrings: !!(vm && Object.values(vm.config).every((v) => typeof v === 'string')),
         };
       })()`);
+
+      // Mounting is not enough: the tts_config bug only fired when the user pressed generate.
+      // Click it, then assert nothing escaped as an uncaught error or rejection.
+      const clickResult = await page.evaluate(`(() => {
+        window.__uncaught = [];
+        window.onerror = (m) => { window.__uncaught.push('onerror: ' + m); return false; };
+        window.addEventListener('unhandledrejection', (e) => {
+          window.__uncaught.push('unhandledrejection: ' + ((e.reason && e.reason.message) || e.reason));
+        });
+        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('标准'));
+        if (!btn) return 'no-generate-button';
+        btn.click();
+        return 'clicked';
+      })()`);
+      assert.equal(clickResult, 'clicked', label + ': the generate button exists');
+      await new Promise((r) => setTimeout(r, 500));
+      const uncaught = await page.evaluate('(() => window.__uncaught)()');
 
       assert.equal(state.mounted, true, label + ': Vue must still mount');
       // The voice list rendering is what actually broke, so assert the DOM, not the computed.
@@ -748,6 +783,17 @@ test('malformed localStorage cannot break the page', { skip: SKIP }, async () =>
       assert.equal(state.cleaningIsObject, true, label + ': cleaning stays an object');
       assert.equal(state.inputIsString, true, label + ': inputText stays a string');
       assert.equal(state.speedIsFinite, true, label + ': speed stays a finite number');
+      assert.equal(
+        state.configAllStrings,
+        true,
+        label + ': every tts_config field must stay a string, or generateSpeech .trim() throws'
+      );
+      assert.deepEqual(
+        uncaught,
+        [],
+        label + ': pressing generate must not raise an uncaught error — a silent dead button ' +
+          'is the worst possible symptom. Got: ' + JSON.stringify(uncaught)
+      );
     }
   } finally {
     await page.evaluate('(() => { localStorage.clear(); return true })()');
