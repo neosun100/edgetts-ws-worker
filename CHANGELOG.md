@@ -2,6 +2,22 @@
 
 ## [2.22.0] - 2026-08-06
 
+### Deployed — 并修好了一条自始至终没跑通的部署路径
+- v2.22.0 已上线 `https://edgetts.aws.xin`。线上复验:`slider-label-row` 4 处、旧
+  `slider-group span` 0 处;浏览器实测数值距**自己的**滑轨 11px、距右邻列 24px(修复前是
+  18px vs 24px,几乎等距 —— 这就是「读起来像标注隔壁列」的成因),滑轨占列宽 98%,322 音色
+  正常渲染。后端冒烟:单块 MP3 200/11808B、10 句多分块 WAV 合并成**单个 RIFF** 200/2.07MB、
+  流式 wav 多分块按预期 400 `stream_format_not_chunkable`。
+- **Deploy workflow 此前从未成功过一次**(`{"failure": 2}`):`v2.1.0` 三天前就以同样原因
+  失败 —— repo 从来没配 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`。也就是说线上那个
+  v2.20 左右的版本**不是 CI 部署的**,是手工 `wrangler deploy` 上去的;这条路径一直是坏的,
+  只因平时不打 tag 就没人看到它红。两个 secret 已配好,并**重跑 v2.22.0 的 deploy 确认
+  success** —— 这是该 workflow 历史上第一次成功。「配好了」不等于「能用」,必须跑一次。
+- 部署前已按项目惯例备份线上产物到
+  `~/backups/edgetts-proxy/edgetts-proxy.20260806-132127.pre-v2.22.0.js`(167KB,已校验含旧
+  UI 标记,可回滚)。所有 CF 操作走 `~/.claude/skills/cloudflare`(强制规则)+
+  `CLOUDFLARE_ADMIN_TOKEN`,token 只从 `~/.env` 现读,不落盘、不回显。
+
 ### Decided — ROADMAP P1-3:前端 API key 存储(Neo 裁定)
 - **裁定:文档化边界,不改后端会话。** 后端会话(同源 cookie + 服务端持有 key)与本项目的
   立足点冲突 —— 任何人一条 `wrangler deploy` 就能部署副本,引入会话存储会给这条路径加依赖。
