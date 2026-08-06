@@ -969,3 +969,62 @@ test('clicking a slider label focuses its slider', { skip: SKIP }, async () => {
     assert.equal(r.focused, true, `clicking the label must focus ${r.for}`);
   }
 });
+
+test('every visible form control has a real accessible name', { skip: SKIP }, async () => {
+  // UI 审计（docs/research/ui-audit-20260807.md）查出的唯一真缺陷：18 个可见控件里有 6 个
+  // 没有正式可访问名称 —— 3 个筛选 select、搜索框、停顿时长输入、输出格式 select。
+  //
+  // 其中 4 个 select **连 placeholder 都没有**，读屏只会念出当前选中值（「全部语言」），
+  // 用户无从知道这是「按语言筛选」还是别的什么。而输出格式那个有可见 <label>，
+  // 只是缺 `for` —— 与前几轮修滑块 label 时同一个问题。
+  //
+  // 判据用 el.labels / aria-label / 被 <label> 包裹，**不接受 placeholder 兜底**：
+  // placeholder 在获得焦点后通常消失，且规范上不是可访问名称的正当来源。
+  const out = await chrome.page.evaluate(`(() => {
+    const ctrls = [...document.querySelectorAll('input, select, textarea')]
+      .filter((el) => el.offsetParent !== null);
+    const unnamed = ctrls
+      .filter((el) => !(el.labels && el.labels.length) && !el.getAttribute('aria-label') && !el.closest('label'))
+      .map((el) => el.tagName + (el.type ? '[' + el.type + ']' : '') +
+        ' placeholder="' + (el.getAttribute('placeholder') || '') + '"');
+    return JSON.stringify({ total: ctrls.length, unnamed });
+  })()`);
+  const { total, unnamed } = JSON.parse(out);
+  assert.ok(total >= 15, `应检查到足够多的控件，实得 ${total}`);
+  assert.deepEqual(
+    unnamed,
+    [],
+    `${unnamed.length}/${total} 个可见控件没有正式可访问名称（label / aria-label / 被 label 包裹）。` +
+      'placeholder 不算：它获得焦点后会消失，规范上也不是可访问名称的正当来源。'
+  );
+});
+
+test('the voice picker uses a correct roving tabindex', { skip: SKIP }, async () => {
+  // 这一条是**防止把对的东西改错**。审计初版把 `tabIndex=-1` 报成「键盘不可达」，
+  // 其实 [-1, -1, -1, 0] 正是 WAI-ARIA radiogroup 的标准实现：只有当前项进 Tab 序列，
+  // 组内移动交给方向键。若有人为了「让所有项可 Tab」把它们都改成 0，
+  // 322 个音色就会各占一个 Tab 停留点，键盘用户要按几百次才能走出这个组 —— 那才是真的坏。
+  const out = await chrome.page.evaluate(`(() => {
+    const items = [...document.querySelectorAll('.voice-item')];
+    const first = items.find((i) => i.tabIndex === 0);
+    let focusWorks = false, arrowMoves = false;
+    if (first) {
+      first.focus();
+      focusWorks = document.activeElement === first;
+      const vm = document.querySelector('#app').__vue_app__._instance.proxy;
+      const before = vm.form.voice;
+      first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      arrowMoves = vm.form.voice !== before;
+    }
+    return JSON.stringify({
+      total: items.length,
+      inTabOrder: items.filter((i) => i.tabIndex === 0).length,
+      focusWorks, arrowMoves,
+    });
+  })()`);
+  const s = JSON.parse(out);
+  assert.ok(s.total > 1, '至少要有多个音色项');
+  assert.equal(s.inTabOrder, 1, `Tab 序列里必须恰好一项，实得 ${s.inTabOrder} —— 全部为 0 会让键盘用户被困在组内`);
+  assert.equal(s.focusWorks, true, '当前项必须真的能聚焦');
+  assert.equal(s.arrowMoves, true, '方向键必须能在组内移动选择');
+});

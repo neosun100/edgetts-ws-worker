@@ -901,7 +901,8 @@
         <div class="label-with-controls">
           <label for="inputText">输入文本</label>
           <div class="pause-controls">
-            <input type="number" v-model.number="pauseTime" min="0.01" max="100" step="0.01" placeholder="停顿时长"
+            <input type="number" v-model.number="pauseTime" min="0.01" max="100" step="0.01"
+                   aria-label="停顿时长（秒）" placeholder="停顿时长"
               class="pause-input" />
             <button type="button" @click="insertPause" class="btn-insert-pause" title="在光标位置插入停顿">
               插入停顿
@@ -942,19 +943,20 @@
           <!-- 筛选器：逐层收窄，任一层可留空 -->
           <div class="voice-filters">
             <input type="text" class="vf-search" v-model="voiceFilter.q"
+                   aria-label="搜索音色"
                    placeholder="🔍 搜索名字 / ShortName / 语言，如 ava、multilingual、zh-CN" />
             <div class="vf-row">
-              <select v-model="voiceFilter.lang" @change="onLangChange">
+              <select v-model="voiceFilter.lang" @change="onLangChange" aria-label="按语言筛选音色">
                 <option value="">全部语言</option>
                 <option v-for="o in langOptions" :key="o.name" :value="o.name">{{ o.name }} ({{ o.count }})</option>
               </select>
-              <select v-model="voiceFilter.region">
+              <select v-model="voiceFilter.region" aria-label="按地区筛选音色">
                 <option value="">全部地区</option>
                 <option v-for="o in regionOptions" :key="o.locale" :value="o.locale">
                   {{ o.flag }} {{ o.locale }} ({{ o.count }})
                 </option>
               </select>
-              <select v-model="voiceFilter.gender">
+              <select v-model="voiceFilter.gender" aria-label="按性别筛选音色">
                 <option value="">全部性别</option>
                 <option value="Female">♀ 女声</option>
                 <option value="Male">♂ 男声</option>
@@ -1015,8 +1017,8 @@
           </div>
         </div>
         <div class="form-group">
-          <label>输出格式</label>
-          <select v-model="form.responseFormat" @change="saveForm">
+          <label for="response-format">输出格式</label>
+          <select id="response-format" v-model="form.responseFormat" @change="saveForm">
             <option value="mp3">MP3 (兼容性好)</option>
             <option value="opus">Opus (高压缩)</option>
             <option value="wav">WAV (无损，体积大)</option>
