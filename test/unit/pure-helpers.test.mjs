@@ -281,3 +281,33 @@ test('both READMEs carry the trusted-environment boundary, not just a vague warn
     );
   }
 });
+
+test('package.json, CHANGELOG and the newest git tag agree on the version', () => {
+  // Found while surveying the project: package.json sat at 2.20.0 while CHANGELOG and the
+  // shipped tag were 2.22.0. It was set once at the start of the project and never touched
+  // again, and nothing noticed — the version is not read at runtime, so drift is invisible.
+  //
+  // It matters for release hygiene: the tag is what deploys, the CHANGELOG is what a reader
+  // trusts, and package.json is what tooling reports. Three sources of truth that disagree
+  // means at least two of them are lying.
+  //
+  // git is not consulted here. Tests must pass on a shallow clone (GitLab CI runs
+  // GIT_DEPTH: 1) and from a tarball with no .git at all, so the tag cannot be a dependency.
+  // package.json vs CHANGELOG is the part that is always checkable, and the release script
+  // is what ties the tag to them.
+  const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const changelog = readFileSync(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
+
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/, 'package.json version is semver');
+
+  // The first [x.y.z] heading in the CHANGELOG is the most recent release.
+  const newest = /^##\s*\[(\d+\.\d+\.\d+)\]/m.exec(changelog);
+  assert.ok(newest, 'CHANGELOG must have a versioned heading');
+  assert.equal(
+    pkg.version,
+    newest[1],
+    `package.json says ${pkg.version} but the newest CHANGELOG entry is ${newest[1]}. ` +
+      'Bump package.json in the same commit as the CHANGELOG entry, or a release reports ' +
+      'a version nobody else agrees with.'
+  );
+});
