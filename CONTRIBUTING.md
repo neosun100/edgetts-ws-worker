@@ -39,6 +39,18 @@ E2E tests come in two kinds:
 Note the zero-dependency rule: the browser tests use Node's built-in `WebSocket` and a
 ~100-line CDP client rather than Playwright, so `npm install` stays a no-op.
 
+Both CI systems run the browser tests, deliberately duplicating them: GitHub Actions on
+`ubuntu-latest` (which ships Chrome), and GitLab in a dedicated `test:browser` job on
+`node:22-bookworm-slim` with chromium installed via apt. The duplication earned its place —
+on 2026-08-06 GitHub Actions had a `major_outage` and could not even allocate a runner, so
+for that day the UI had no CI coverage at all.
+
+Because the browser tests **skip** rather than fail when no Chrome is found, a broken image
+would leave that job reporting "21 ok" and green forever while guarding nothing. The GitLab
+job therefore asserts on the `# skipped` and `# pass` counts after running. If you change the
+image or the Chrome path, verify the guard still fails by pointing `CHROME_PATH` somewhere
+non-existent — a guard that cannot fail is not a guard.
+
 The e2e suite runs **serially and after** the fast tests, and this matters. It drives a real
 Chrome plus several HTTP servers; running it alongside eight other test files caused
 `page load timeout` failures from resource contention (measured: 27 failures in a fully

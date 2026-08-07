@@ -17,7 +17,7 @@ P2 里 6/7 已完成或裁定。**唯一还值得做的是「让 GitLab 也能�
 | ~~2. 版本号一致性~~ ✅ 已完成 | `package.json` 曾停在 2.20.0，CHANGELOG/tag 已 2.22.0，且无测试守护 | 已修 + 加测试 |
 | ~~3. 用日志回答维度问题~~ ✅ **已做** | 用新日志跑了三轮维度普查（voice / format / chunks），**每一轮都抓到真 bug** | 见下方「日志驱动的三轮普查」 |
 | ~~4. `cleanText` 脏数据来源注释~~ ✅ 已完成 | 三处补上来源与后果 | 见 P2 |
-| **5. GitLab 跑 browser e2e** | GitLab `node:22-slim` 无 Chrome，21 个 browser e2e **全跳过** | **优先级已上调**：GitHub Actions 曾 `major_outage`，那天 UI 回归没有任何 CI 防线 |
+| ~~5. GitLab 跑 browser e2e~~ ✅ **已完成** | 拆出 `test:browser` job（`node:22-bookworm-slim` + apt chromium），21 项**全跑、0 skip** | 见下方「双 CI 覆盖」 |
 | 6. TS 化 / 前端拆分 | `ui/index.html` 已 2463 行 | 大改动、零用户可见收益，**不建议现在动** |
 
 **明确不做**（都有实测依据，不是拖延）：
@@ -29,6 +29,45 @@ P2 里 6/7 已完成或裁定。**唯一还值得做的是「让 GitLab 也能�
 **一条判断原则**（本轮反复验证）：**先量，再改。** 本轮每个「可能有问题」的猜测被量化后，
 一半变成了「确实是缺陷」（栅栏 2.5×、token 归因、UI 邻近性），另一半变成了「不值得做」
 （MP3 padding）。没量之前两者长得一样。
+
+---
+
+## 双 CI 覆盖（2026-08-08）
+
+UI 回归此前只有 GitHub 一条自动防线。2026-08-06 GitHub Actions 出现 `major_outage`
+（官方状态页确认 `Actions: major_outage`）：同一 commit 在 GitLab 通过，而 GitHub 连 runner
+都拿不到（job `steps` 数为 0，等 15 分钟被 cancelled）。**那天 21 个 browser e2e 一个都没跑**，
+UI 只剩本机 `npm test` 守着。
+
+现在 GitLab 拆成两个并行 job：
+
+| job | 镜像 | 内容 | 耗时 |
+|---|---|---|---|
+| `test` | `node:22-slim` | 后端 323 项 + build + dist 守卫 | ~51s |
+| `test:browser` | `node:22-bookworm-slim` + apt chromium | 21 项 browser e2e | ~193s |
+
+**为什么拆开而不是合成一个**：apt 装 chromium 是耗时主项（50s → 193s）。合成一个会让每次
+改后端也等满 193s；拆开后两者并行，总墙钟不变，但后端结论 51s 就有。
+
+**镜像是实测选的，不是猜的**。探针分支 `probe/gitlab-chrome` 一次流水线并行试三个：
+
+| 候选 | Node | Chrome | 结论 |
+|---|---|---|---|
+| `zenika/alpine-chrome:with-node` | 20.15 ⚠️ | Chromium 124 @ `/usr/bin/chromium` | Node 版本与仓库不符 |
+| `mcr.microsoft.com/playwright:v1.49.1-jammy` | 22.12 | **不在任何标准路径** | `cdp.mjs` 找不到 |
+| **`node:22-bookworm-slim` + apt** | **22.23** | **Chromium 151** | ✅ 采用 |
+
+**关键设计:防「静默全 skip」守卫**。e2e 在找不到 Chrome 时是 **skip 而非 fail**（刻意设计，
+否则无 Chrome 的机器会无故变红）。这意味着一旦镜像里的 Chrome 出问题，这个 job 会报
+「21 ok」并**永远绿，却什么都没守住**。所以 job 末尾显式检查 `# skipped` 与 `# pass`
+的数量。已用变异验证：把 `CHROME_PATH` 指向不存在的路径并跳过 apt 安装 →
+`test:browser` **failed**。
+
+这与本仓库另一次教训是同一件事：`__test__` 守卫此前只存在于 CI，`npm test` 跑不到它，
+于是「本地绿」不等于「CI 绿」。**一个不会失败的守卫等于没有守卫。**
+
+另一处细节：`| tee` 会让管道的退出码取 `tee` 的（永远 0），测试失败会被吞掉。
+所以那一步显式 `set -o pipefail`。
 
 ---
 
@@ -306,14 +345,14 @@ e2e 共 28 项 = **19** browser（`browser-playback`，需 Chrome）+ **3** lega
 | | 镜像 | fast 层 283 | 19 browser | 9 真网 |
 |---|---|---|---|---|
 | GitHub Actions | `ubuntu-latest`（**预装 Chrome**） | 全跑 | ✅ **全跑** | 跳过 |
-| GitLab CI | `node:22-slim`（**无 Chrome**） | 全跑 | ❌ **全跳过** | 跳过 |
+| GitLab CI | `test` = `node:22-slim`；`test:browser` = `node:22-bookworm-slim` + apt chromium | 全跑 | ✅ **全跑**（2026-08-08 起） | 跳过 |
 
 GitLab 日志实测：`# tests 28 / pass 0 / skipped 28`，原因 `Chrome unavailable or not
 launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 
-所以 **UI 回归的自动防线只有 GitHub 一条**，GitLab 只覆盖后端。自动 skip 是刻意设计（否则
-镜像差异会让构建无故变红），但**边界要写明**：GitHub 一旦长期不可用，UI 就退回「只有本机
-`npm test` 才守得住」。见 P2「让 GitLab 也能跑 browser e2e」。
+**2026-08-08 起两边都跑 browser e2e**，UI 回归有了两条独立防线。此前只有 GitHub 一条，
+而 2026-08-06 GitHub Actions 的 `major_outage` 正好暴露了那个单点：那天 UI 回归实际上
+没有任何 CI 防线。详见下方「双 CI 覆盖」。
 
 ### 9. 部署链路 ✅ 已修（2026-08-06）
 `v2.22.0` 之前 **Deploy workflow 从未成功过一次**（`{"failure": 2}`）：repo 从来没配
@@ -331,7 +370,7 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 | 项 | 说明 |
 |---|---|
 | ~~**版本号漂移**~~ ✅ | 已修（2.28.1）：`package.json` 曾停在 2.20.0 而 CHANGELOG/tag 已 2.22.0，且无守护。现有一致性测试比对 `package.json` 与 CHANGELOG 首个版本号（刻意**不查 git tag** —— 测试必须能在浅克隆与无 `.git` 的 tarball 里通过） |
-| 让 GitLab 也能跑 browser e2e | 现 `node:22-slim` 无 Chrome，21 个 browser e2e 全跳过。换 `zenika/alpine-chrome` 或 playwright 镜像即可，但需确认内部 runner 能拉该镜像。**优先级已上调**：2026-08-06 GitHub Actions 出现 `major_outage`（官方状态页确认），同一 commit 在 GitLab 通过而 GitHub 连 runner 都拿不到 —— 那天 UI 回归实际上**没有任何 CI 防线**，只有本机 `npm test`。这正是「重复跑」的价值 |
+| ~~让 GitLab 也能跑 browser e2e~~ ✅ | 已完成（2.30.0）：拆出 `test:browser` job。镜像是**实测选出来的**，探针分支一次流水线并行试了三个 —— `zenika/alpine-chrome:with-node` 有 Chromium 124 但 Node 只有 20.15（本仓库用 22）；`mcr.microsoft.com/playwright` 有 Node 22 但 Chrome 不在任何标准路径下，`cdp.mjs` 找不到；`node:22-bookworm-slim` + apt chromium 两项都对（Node 22.23 + Chromium 151），实测 21 项全跑、0 skip |
 | TypeScript 化 | 现为 JS。加 `// @ts-check` + JSDoc 是低成本折中，无需改造构建 |
 | 前端拆分 | `ui/index.html` 已 **2463 行**（原记 1200+），含 322 语音的语言映射表。可抽出数据表 |
 | ~~语音列表缓存~~ ✅ | 已完成：进程内 6 小时缓存 + `Cache-Control: max-age=21600`；并发合并；上游故障时返回过期缓存(留 warn 痕迹)，冷启动失败才降级到内置列表(`no-store`) |

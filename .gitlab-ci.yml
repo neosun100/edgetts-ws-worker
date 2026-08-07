@@ -1,7 +1,11 @@
-# GitLab CI for gitlab.aws.dev — mirrors .github/workflows/ci.yml.
-# No dependencies to install: tests use Node's built-in test runner.
-# Docker Hub node images are pullable on the internal runners.
-
+# GitLab CI for gitlab.aws.dev — 与 .github/workflows/ci.yml 覆盖同一批测试。
+# 无需安装依赖:测试只用 Node 内置的 test runner。内部 runner 能拉 Docker Hub 镜像。
+#
+# 拆成两个并行 job,而不是一个:
+#   test          — 后端 323 项,node:22-slim,约 50s。改后端时最快拿到反馈。
+#   test:browser  — 21 项 browser e2e,需要 Chrome,约 190s(其中 apt 装 chromium 占大头)。
+# 合成一个 job 会让每次改动都等满 190s;拆开后两者并行,总墙钟时间仍是 ~190s,
+# 但后端结论 50s 就有了。
 stages:
   - test
 
@@ -19,12 +23,13 @@ test:
       node --check src/worker.js
     # Build before testing: dist/ is gitignored, so it does not exist on a fresh
     # clone, and the tests that read dist/worker.js (BUG#7c escaping regression, the
-    # browser e2e suite) would skip or fail. This image has no Chrome, so the browser
-    # tests still skip here — but BUG#7c now actually runs.
+    # test-export guard) would skip or fail.
     - |
       npm run build
     - |
       node --check dist/worker.js
+    # 这条镜像没有 Chrome,21 个 browser e2e 会自动 skip —— 它们由下面的
+    # test:browser job 负责。BUG#7c 与 test-export 守卫在这里照常运行。
     - |
       npm test
     - |
@@ -32,6 +37,63 @@ test:
     - |
       if grep -q "__test__" dist/worker.js; then
         echo "ERROR dist/worker.js still contains __test__ export"
+        exit 1
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# UI 回归的第二道防线。
+#
+# 为什么值得单独开一个 job:2026-08-06 GitHub Actions 出现 major_outage(官方状态页确认),
+# 同一 commit 在 GitLab 通过,而 GitHub 连 runner 都拿不到(job steps 数为 0,等 15 分钟
+# 被 cancelled)。那天 21 个 browser e2e **只在 GitHub 跑**,于是 UI 回归实际上没有任何
+# CI 防线,只剩本机 npm test。
+#
+# 镜像选择是实测出来的,不是猜的(探针分支 probe/gitlab-chrome 一次流水线并行试了三个):
+#   zenika/alpine-chrome:with-node  — 有 Chromium 124,但 Node 只有 20.15,与本仓库的 22 不符
+#   mcr.microsoft.com/playwright    — Node 22,但 Chrome 不在任何标准路径下,cdp.mjs 找不到
+#   node:22-bookworm-slim + apt     — Node 22.23 + Chromium 151,两项都对 ✅
+# 实测该组合下 21 项全部执行、0 skip。
+test:browser:
+  stage: test
+  image: node:22-bookworm-slim
+  variables:
+    # cdp.mjs 把 CHROME_PATH 放在候选列表**第一位**,所以这里显式指定即可,
+    # 不依赖它去猜路径。
+    CHROME_PATH: /usr/bin/chromium
+  script:
+    - |
+      apt-get update -qq >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >/dev/null
+      "$CHROME_PATH" --version
+    - |
+      node --version
+    # e2e 里的 ui-server 从 dist/worker.js 抽取 UI_HTML,所以必须先构建。
+    - |
+      npm run build
+    # 只跑 browser 那个文件:legacy-timestamps 与 real-synth 需要访问已部署服务,
+    # 在 CI 里没有凭据,会自行 skip —— 单独跑这个文件让「21 项全过」成为明确信号。
+    #
+    # 跑**一次**并把输出留存,随后就着它做断言。第一版我写成跑两遍(一次给人看、
+    # 一次 tee 给 grep),那会让这个 190s 的 job 白白翻倍。
+    # set -o pipefail 是必须的:管道进 tee 之后,退出码默认取 tee 的(永远是 0),
+    # 于是测试失败也会被吞掉 —— 这个 job 就变成永远绿。
+    - |
+      set -o pipefail
+      node --test --test-concurrency=1 --test-timeout=180000 \
+        "test/e2e/browser-playback.test.mjs" 2>&1 | tee /tmp/e2e.log
+    # 防止这个 job 退化成「静默全 skip」:那样它会永远绿,却什么都没守住。
+    # 无 Chrome 时 e2e 会 skip 而非 fail(刻意设计,见 browser-playback.test.mjs 顶部注释),
+    # 所以必须显式检查真的跑了 —— 这正是本仓库「守卫只在 CI 里、本地绿 != CI 绿」那次
+    # 教训的反面:一个不会失败的守卫等于没有守卫。
+    - |
+      if grep -qE "^# skipped [1-9]" /tmp/e2e.log; then
+        echo "ERROR browser e2e 被 skip 了 —— Chrome 没起来,这个 job 没有守住任何东西"
+        exit 1
+      fi
+      if ! grep -qE "^# pass ([1-9][0-9]+)" /tmp/e2e.log; then
+        echo "ERROR 没有足够多的 browser 测试真正执行"
         exit 1
       fi
   rules:

@@ -1,5 +1,54 @@
 # Changelog
 
+## [2.30.0] - 2026-08-08
+
+**ROADMAP 最后一项**:让 GitLab 也跑 browser e2e。UI 回归此前只有 GitHub 一条自动防线。
+
+### Added — GitLab 的 `test:browser` job
+21 项 browser e2e 现在**两边都跑**,实测 GitLab 上 **21/21 全过、0 skip**。
+
+拆成两个并行 job 而非合成一个:apt 装 chromium 是耗时主项(51s → 193s)。合成会让每次
+改后端也等满 193s;拆开后并行执行,总墙钟不变,而后端结论 51s 就有。
+
+| job | 镜像 | 内容 | 耗时 |
+|---|---|---|---|
+| `test` | `node:22-slim` | 后端 323 项 + build + dist 守卫 | 51s |
+| `test:browser` | `node:22-bookworm-slim` + apt chromium | 21 项 browser e2e | 193s |
+
+### 镜像是实测选的,不是猜的
+ROADMAP 原话是「换 `zenika/alpine-chrome` 或 playwright 镜像即可,但**需确认内部 runner
+能拉该镜像**」。开了探针分支一次流水线并行试三个(每个 `allow_failure`,一次拿到全部结论):
+
+| 候选 | Node | Chrome | 结论 |
+|---|---|---|---|
+| `zenika/alpine-chrome:with-node` | **20.15** ⚠️ | Chromium 124 | Node 与本仓库的 22 不符 |
+| `mcr.microsoft.com/playwright:v1.49.1-jammy` | 22.12 | **不在任何标准路径** | `cdp.mjs` 找不到 |
+| **`node:22-bookworm-slim` + apt** | **22.23** | **Chromium 151** | ✅ 采用 |
+
+三个镜像内部 runner **都能拉**,所以卡点不是拉取权限,而是 Node/Chrome 的组合。
+若按 ROADMAP 的字面建议直接上 zenika,会踩到 Node 20。
+
+### 关键设计:防「静默全 skip」守卫
+e2e 找不到 Chrome 时是 **skip 而非 fail**(刻意设计,否则无 Chrome 的机器会无故变红)。
+这意味着镜像里 Chrome 一旦出问题,这个 job 会报「21 ok」并**永远绿、却什么都没守住**。
+所以 job 末尾显式检查 `# skipped` 与 `# pass` 的数量。
+**已用变异验证**:把 `CHROME_PATH` 指向不存在的路径并跳过 apt 安装 → `test:browser`
+**failed**,日志显示 21 项全部 `# SKIP Chrome unavailable`。
+
+这与本仓库另一次教训同源:`__test__` 守卫此前只在 CI 里,`npm test` 跑不到,于是
+「本地绿」不等于「CI 绿」。**一个不会失败的守卫等于没有守卫。**
+
+### 两处实现细节
+- `| tee` 会让管道退出码取 `tee` 的(永远 0),测试失败会被吞掉 —— 那一步显式 `set -o pipefail`。
+- 第一版我把 e2e 跑了**两遍**(一次给人看、一次 `tee` 给 grep),那会让 193s 的 job 白白翻倍。
+  改为跑一次并留存输出。
+
+### 文档
+ROADMAP 三处「GitLab 全跳过」已改对并新增「双 CI 覆盖」一节;CONTRIBUTING 补上 CI 行为说明,
+含「改镜像或 Chrome 路径后,要把 `CHROME_PATH` 指向不存在的地方验证守卫仍会失败」。
+
+共 **344 项**(323 fast + 21 e2e),0 失败。
+
 ## [2.29.1] - 2026-08-08
 
 收尾：把 ROADMAP 里过期的状态改对，并给快照加上防腐测试。**无行为改动。**
