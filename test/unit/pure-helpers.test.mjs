@@ -311,3 +311,38 @@ test('package.json, CHANGELOG and the newest git tag agree on the version', () =
       'a version nobody else agrees with.'
   );
 });
+
+test('the ROADMAP snapshot numbers still match the code', () => {
+  // 快照上一次写于 2026-08-06，两天后就全面过期：src 从 1430 涨到 1708 行、测试从 313
+  // 涨到 357 项、提交从 89 到 99。**没有任何东西在看着它**，而这个项目已经因为
+  // 「文档数字悄悄失真」踩过三次（README 的「90000 字符可达」、「CPU < 1ms」、
+  // 「chunk_size=300 约 13500 字符」）。
+  //
+  // 只钉**代码里查得到**的量：行数与测试项数。覆盖率、提交数、缺陷计数需要跑工具或查
+  // git，那些在浅克隆/无 .git 的 tarball 里不可得（与版本一致性测试同一考量）。
+  // 容差 ±10%：快照是「量级参考」而不是精确账本，太紧会让每次改动都要更新文档。
+  const roadmap = readFileSync(new URL('../../ROADMAP.md', import.meta.url), 'utf8');
+  const workerLines = readFileSync(new URL('../../src/worker.js', import.meta.url), 'utf8').split('\n').length;
+  const uiLines = readFileSync(new URL('../../ui/index.html', import.meta.url), 'utf8').split('\n').length;
+
+  const snapshot = roadmap.split(/\n## /).find((s) => s.startsWith('项目现状快照'));
+  assert.ok(snapshot, 'ROADMAP 必须有「项目现状快照」一节');
+
+  // 用字面正则，别用 new RegExp 拼字符串 —— 第一版就是那样写的，转义在 heredoc 里翻倍，
+  // 匹配不到任何东西，于是测试报「快照里必须写明行数」而快照其实写了。
+  const m = /`src\/worker\.js` \*\*(\d+)\*\* 行 \+ `ui\/index\.html` \*\*(\d+)\*\*/.exec(snapshot);
+  const pair = m ? [Number(m[1]), Number(m[2])] : null;
+  assert.ok(pair, '快照里必须写明两个文件的行数，形如 `src/worker.js` **N** 行 + `ui/index.html` **M** 行');
+  const [claimedWorker, claimedUi] = pair;
+
+  const near = (a, b) => Math.abs(a - b) / b < 0.1;
+  assert.ok(
+    near(claimedWorker, workerLines),
+    `快照说 src/worker.js 有 ${claimedWorker} 行，实际 ${workerLines} 行（偏差超过 10%）。` +
+      '快照过期本身就是本项目踩过三次的老问题，请更新它。'
+  );
+  assert.ok(
+    near(claimedUi, uiLines),
+    `快照说 ui/index.html 有 ${claimedUi} 行，实际 ${uiLines} 行（偏差超过 10%）`
+  );
+});
