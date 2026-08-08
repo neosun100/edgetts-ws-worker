@@ -9,7 +9,7 @@
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**[中文文档 / Chinese](README_CN.md)** · **[Roadmap](ROADMAP.md)** · **[Changelog](CHANGELOG.md)**
+**[中文文档 / Chinese](README_CN.md)** · **[Roadmap](ROADMAP.md)** · **[Changelog](CHANGELOG.md)** · **[Handoff / context for contributors](docs/HANDOFF.md)**
 
 A single Cloudflare Worker that turns Microsoft Edge / Azure TTS into a fast,
 **OpenAI-compatible** text-to-speech API — with true streaming playback, 322 voices,

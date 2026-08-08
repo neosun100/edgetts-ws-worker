@@ -346,3 +346,44 @@ test('the ROADMAP snapshot numbers still match the code', () => {
     `快照说 ui/index.html 有 ${claimedUi} 行，实际 ${uiLines} 行（偏差超过 10%）`
   );
 });
+
+test('the handoff doc exists, is linked, and its code map matches reality', () => {
+  // docs/HANDOFF.md 是给接手者（含其他 Agent）的唯一入口，里面的错事实代价最高：
+  // 读它的人会拿它当权威，而不会去核对。本项目已经三次交付过悄悄失真的文档数字
+  // （README 的「90000 字符可达」、「CPU < 1ms」、「chunk_size 300 约 13500 字符」），
+  // 所以这份也必须有东西盯着。
+  //
+  // 只钉两类可从代码推出的东西：代码地图里的行数，以及它被哪些文档引用（否则没人找得到）。
+  // 覆盖率、提交数、测试项数需要跑工具或查 git，在浅克隆与无 .git 的 tarball 里不可得
+  // —— 与版本一致性、快照那两个测试同一考量。
+  const read = (rel) => readFileSync(new URL('../../' + rel, import.meta.url), 'utf8');
+  const handoff = read('docs/HANDOFF.md');
+
+  // 1. 必须回答「这是什么项目 / 现状 / 还剩什么 / 有哪些坑」这四件事。
+  for (const heading of ['这是什么项目', '现在是什么状态', '刻意', '坑']) {
+    assert.ok(handoff.includes(heading), `HANDOFF 必须有「${heading}」相关章节`);
+  }
+
+  // 2. 代码地图的行数必须与实际相符（容差 ±10%，它是量级参考不是账本）。
+  //    行数用「换行符个数」计，与 wc -l 一致 —— split('\n').length 会多算末尾空串，
+  //    我第一版校验脚本就是那样写的，四个文件全部差 1，看着像文档写错了。
+  const lineCount = (rel) => read(rel).split('\n').length - 1;
+  for (const [rel, label] of [['src/worker.js', 'src/worker.js'], ['ui/index.html', 'ui/index.html']]) {
+    const actual = lineCount(rel);
+    const row = handoff.split('\n').find((l) => l.includes('`' + label + '`') && /\|\s*\d{3,}\s*\|/.test(l));
+    assert.ok(row, `HANDOFF 的代码地图里必须有 ${label} 及其行数`);
+    const claimed = Number(/\|\s*(\d{3,})\s*\|/.exec(row)[1]);
+    assert.ok(
+      Math.abs(claimed - actual) / actual < 0.1,
+      `HANDOFF 说 ${label} 有 ${claimed} 行，实际 ${actual} 行（偏差超 10%）——请更新代码地图`
+    );
+  }
+
+  // 3. 必须从主要入口可达，否则等于不存在。
+  for (const rel of ['README.md', 'README_CN.md', 'ROADMAP.md', 'CONTRIBUTING.md']) {
+    assert.ok(
+      read(rel).includes('HANDOFF.md'),
+      `${rel} 必须链到 docs/HANDOFF.md —— 一份没人找得到的交接文档等于没写`
+    );
+  }
+});

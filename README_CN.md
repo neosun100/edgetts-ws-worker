@@ -9,7 +9,7 @@
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**[English](README.md)** · **[路线图](ROADMAP.md)** · **[更新日志](CHANGELOG.md)**
+**[English](README.md)** · **[路线图](ROADMAP.md)** · **[更新日志](CHANGELOG.md)** · **[交接文档](docs/HANDOFF.md)**
 
 一个 Cloudflare Worker，把微软 Edge / Azure TTS 封装成一套**兼容 OpenAI** 的语音合成
 API —— 支持真流式播放、322 个音色、内置 Web UI，零运维。无服务器、全球边缘、免费额度友好。

@@ -1,5 +1,8 @@
 # Contributing
 
+> New here? Read [`docs/HANDOFF.md`](docs/HANDOFF.md) first — it covers what this
+> project is, why the decisions were made, and the traps that cost the most time.
+
 Thanks for your interest in improving edgetts-ws-worker.
 
 ## Project layout
