@@ -49,7 +49,7 @@ UI 只剩本机 `npm test` 守着。
 
 | job | 镜像 | 内容 | 耗时 |
 |---|---|---|---|
-| `test` | `node:22-slim` | 后端 327 项 + build + dist 守卫 | ~51s |
+| `test` | `node:22-slim` | 后端 326 项 + build + dist 守卫 | ~51s |
 | `test:browser` | `node:22-bookworm-slim` + apt chromium | 21 项 browser e2e | ~193s |
 
 **为什么拆开而不是合成一个**：apt 装 chromium 是耗时主项（50s → 193s）。合成一个会让每次
@@ -391,10 +391,9 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 | 维度 | 数字 | 备注 |
 |---|---|---|
 | 生产代码 | `src/worker.js` **1708** 行 + `ui/index.html` **2463** 行 | 单文件 Worker + 内嵌 Vue SPA |
-| 测试代码 | **9299** 行 / **360** 项（348 跑 + 12 需凭证 skip） | 测试:源码 ≈ **2.2:1** |
+| 测试代码 | **9283** 行 / **359** 项（347 跑 + 12 需凭证 skip） | 测试:源码 ≈ **2.2:1** |
 | `src/worker.js` 覆盖率 | **99.47% 行 / 97.76% 分支** | 未覆盖仅 2 处，均为**已证不可达**的防御分支（catch-all 处理器；`input_empty_after_cleaning` 已穷举 5768 种组合证明不可达） |
 | 运行时依赖 | **0** | `node_modules` 空；构建与测试只用 Node 内置能力 |
-| 提交数 | **102** | Conventional Commits |
 | 硬编码密钥扫描 | 干净 | 唯一硬编码 base64 是微软 Edge TTS 客户端的**公开固定签名密钥**（逆向公知），非用户凭据 |
 | 累计修复缺陷 | **11 个**（五轮系统审计） | `cleanText` 8 + WebM 1 + UI 无障碍 1 + CI 守卫缺失 1 |
 
@@ -419,7 +418,7 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 ## 命令速查
 
 ```bash
-npm test        # 单元 + 集成 + 回归 + browser e2e（360 项，零依赖）
+npm test        # 单元 + 集成 + 回归 + browser e2e（359 项，零依赖）
 npm run test:e2e # 真网 E2E，需 EDGETTS_E2E=1
 npm run coverage # 覆盖率（具体数字见上方「项目现状快照」，不在此重复）
 npm run check   # 语法检查 + 单测

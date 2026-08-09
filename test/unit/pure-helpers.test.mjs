@@ -2,8 +2,7 @@
 // Run with: npm test   (node --test, no external deps)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
 import { __test__ } from '../../src/worker.js';
 
 const { LIMITS, VOICE_RE, STYLE_RE, clamp, timingSafeEqual, escapeXmlAttr, getSsml, smartChunkText, cleanText } = __test__;
@@ -467,39 +466,24 @@ test('the docs agree with the real test-suite line count', () => {
   }
 });
 
-test('the docs agree with the real commit count', (t) => {
-  // 提交数要查 git，而**浅克隆的 `rev-list --count` 给的是错数**（只有抓下来的那部分），
-  // 无 .git 的 tarball 更是完全拿不到。那种情况下硬断言会让 CI 无故变红，
-  // 所以显式 skip 并说明原因 —— 一个会误报的守卫比没有守卫更糟。
-  // 既有三个文档测试刻意不查 git tag，正是同一考量。
-  if (!existsSync(docsRoot('.git'))) {
-    return t.skip('无 .git（tarball 或导出的源码包），提交数不可得');
-  }
-  let actual;
-  let shallow;
-  try {
-    shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
-      cwd: docsRoot('.'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    actual = Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], {
-      cwd: docsRoot('.'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim());
-  } catch {
-    return t.skip('git 不可用或当前不是仓库，提交数不可得');
-  }
-  if (shallow === 'true') return t.skip('浅克隆的提交数是错的，跳过');
-  assert.ok(Number.isFinite(actual) && actual > 0, `提交数统计异常（得到 ${actual}）`);
-
-  // 容差 ±5：文档必然落后于「记录它的那个 commit 之后的几次提交」，这是自指造成的
-  // 结构性滞后，不是失真。但差到 5 以上（本次 ROADMAP 差 3、HANDOFF 差 2 都还在容差内，
-  // 而 `npm test` 项数差 119）就说明没人在更新了。
-  for (const [rel, label] of [['ROADMAP.md', 'ROADMAP 快照'], ['docs/HANDOFF.md', 'HANDOFF 现状表']]) {
-    const doc = readDoc(rel);
-    const m = /\|\s*提交数?\s*\|\s*\*{0,2}(\d+)\*{0,2}\s*\|/.exec(doc);
-    assert.ok(m, `${label} 必须有「提交数」一行`);
-    assert.ok(
-      Math.abs(Number(m[1]) - actual) <= 5,
-      `${label} 说提交数 ${m[1]}，实际 ${actual}（差超过 5）——请更新`
-    );
-  }
-});
+// 这里**刻意没有**「提交数」守卫，也刻意不在文档里记提交数 —— 别再加回来。
+//
+// 2026-08-09 我加过一条（容差 ±5），当天就判断它是错的并删掉。原因不是实现问题，
+// 而是**选错了字段**：守卫的字段分两类 ——
+//
+//   可校验的量   文档写错才失败。版本号（必须等于 package.json）、行数（±10% ≈ 900 行余量）
+//   单调漂移的量 与文档正确性无关、却每次提交都变。提交数就是这类。
+//
+// 给后者加守卫得到的不是防腐，而是**一个定时闹钟**：写下 102 之后，正常开发三次提交
+// 就会让 CI 为「没人做错的事」变红，而修法是去改一个数字让它闭嘴。那训练出来的习惯是
+// 「守卫红了就改文档」，而不是「守卫红了说明真有问题」——
+// 本项目那条「一个不会失败的守卫等于没有守卫」的反面同样成立：
+// **一个会为无关原因失败的守卫，会让人学会忽略守卫。**
+//
+// 当初的判据「差 5 以上说明没人在更新了」本身就不具备区分力：正常提交三次也差 3，
+// 与「文档失真」无法区分。这与本项目记录过的「绿着却什么都没守住的测试」是同一类错误的
+// 镜像 —— 那次是绿着什么都没证明，这次是**红着什么都没证明**。
+//
+// 根治办法不是调容差，而是**这个数字根本不该写进文档**：想知道提交数，
+// `git rev-list --count HEAD` 一秒就有，写进文档只是凭空造出一个会漂移的副本。
+// 已从 ROADMAP 与 HANDOFF 双双删除 —— 没有副本就没有漂移，也就不需要守卫。
