@@ -247,6 +247,11 @@ npx wrangler tail edgetts-proxy --format=json
 
 ## 8. 还剩什么（TODO）
 
+> **完整清单见 [`docs/FUTURE_WORK.md`](FUTURE_WORK.md)** —— 那份还额外记了「观察到但明确
+> 不构成问题」的 6 项（防止重复调查），以及每条的前置条件。
+>
+> **当前状态：Neo 2026-08-09 明确「当前已经很好了」，下列一项都不要主动做。**
+
 **P0 / P1 全部关闭，P2 里「值得做」的也都做完了。** 剩下两项，**当前明确不建议动**：
 
 ### TODO-1：`// @ts-check` + JSDoc（低成本那半）

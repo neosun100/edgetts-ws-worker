@@ -1,5 +1,8 @@
 # ROADMAP / TODO
 
+> **本文件的 P0/P1/P2 已全部关闭，现在是一份历史记录。**
+> 「将来也许值得做、但当前明确不做」的事记在 [`docs/FUTURE_WORK.md`](docs/FUTURE_WORK.md)。
+>
 > **接手这个项目？先读 [`docs/HANDOFF.md`](docs/HANDOFF.md)。** 那份讲「这是什么项目、
 > 为什么这么做、动手前必须知道哪些坑」；本文件只列「做什么 / 做完了什么」。
 
