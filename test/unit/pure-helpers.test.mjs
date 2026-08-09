@@ -2,7 +2,8 @@
 // Run with: npm test   (node --test, no external deps)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { __test__ } from '../../src/worker.js';
 
 const { LIMITS, VOICE_RE, STYLE_RE, clamp, timingSafeEqual, escapeXmlAttr, getSsml, smartChunkText, cleanText } = __test__;
@@ -384,6 +385,121 @@ test('the handoff doc exists, is linked, and its code map matches reality', () =
     assert.ok(
       read(rel).includes('HANDOFF.md'),
       `${rel} 必须链到 docs/HANDOFF.md —— 一份没人找得到的交接文档等于没写`
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 以下三条补的是上面三个测试**都没盯住**的字段。
+//
+// 2026-08-09 核对时，被盯住的字段（1708 / 2463 行）全部准确，而没被盯住的全部漂移了：
+// 线上版本差 7 个版本、`npm test` 项数差 119、提交数差 3、测试行数差 41。
+//
+// 成因值得记：`9142` / 提交 `101` / 版本 `2.30.0` 这三个数字**在写下的那一刻都是对的**
+// —— 是写它们的那个 commit 自己把它们推进了一格（新增测试 → 行数变；提交 +1；版本 +0.0.1）。
+// **一份声明自身状态的文档，写完就过时了**，人工更新追不上这种自指。
+//
+// 判据沿用既有三个文档测试的约束：只钉**不跑工具、不依赖网络**就能得到的量。
+// 覆盖率与缺陷计数因此仍不在守卫内 —— 那两个改用「去重」处理（只在一处写，别处指向它）。
+// ---------------------------------------------------------------------------
+
+const docsRoot = (rel) => new URL('../../' + rel, import.meta.url);
+const readDoc = (rel) => readFileSync(docsRoot(rel), 'utf8');
+
+test('the handoff doc header states the current package version', () => {
+  // 直接抓本次踩到的那类错：HANDOFF 表头写 2.30.0 而 package.json 已是 2.30.1。
+  // 接手者会拿表头当权威去判断「线上是否落后」，写错的代价是一次多余的部署。
+  const pkg = JSON.parse(readDoc('package.json'));
+  const handoff = readDoc('docs/HANDOFF.md');
+
+  // 表头形如：> 最后更新：... · 对应版本 `2.30.2` · 线上 `v2.29.1`
+  const m = /对应版本\s*`(\d+\.\d+\.\d+)`/.exec(handoff);
+  assert.ok(m, 'HANDOFF 表头必须写明「对应版本 `x.y.z`」');
+  assert.equal(
+    m[1],
+    pkg.version,
+    `HANDOFF 表头说对应版本 ${m[1]}，而 package.json 是 ${pkg.version}。` +
+      '同一个 commit 里一起改 —— 否则接手者会据此误判线上是否落后（本项目已踩过）。'
+  );
+
+  // §2 的代码块里还有一份 `package.json  x.y.z`，同样得跟上（重复的副本必须一起校验，
+  // 否则去重不彻底就等于留了一个不会变红的错事实）。
+  const block = /package\.json\s+(\d+\.\d+\.\d+)/.exec(handoff);
+  assert.ok(block, 'HANDOFF §2 的代码块必须写明 package.json 的版本');
+  assert.equal(
+    block[1],
+    pkg.version,
+    `HANDOFF §2 代码块说 package.json 是 ${block[1]}，实际 ${pkg.version}`
+  );
+});
+
+test('the docs agree with the real test-suite line count', () => {
+  // 测试行数是「测试:源码 ≈ 2.2:1」这个论断的分子，写错会让读者高估或低估测试投入。
+  // 用换行符个数计，与 wc -l 一致（split('\n').length 会多算末尾空串 —— 踩过）。
+  // 含 helpers/：文档记的「23 个文件」正是 test/ 下全部 .mjs（四个用例目录只有 19 个），
+  // 所以行数也必须同口径 —— 口径不一致的校验会把对的文档判成错的。
+  const dirs = ['unit', 'integration', 'regression', 'e2e', 'helpers'];
+  let actual = 0;
+  let files = 0;
+  for (const dir of dirs) {
+    for (const f of readdirSync(docsRoot('test/' + dir)).filter((n) => n.endsWith('.mjs'))) {
+      actual += readDoc(`test/${dir}/${f}`).split('\n').length - 1;
+      files++;
+    }
+  }
+  // 自检：荒谬的数字先怀疑探针本身，别怀疑文档（本项目的方法论第一条）。
+  assert.ok(files > 10 && actual > 1000, `测试统计异常（${files} 文件 / ${actual} 行）—— 先查探针`);
+
+  for (const [rel, label, rowKey] of [
+    ['ROADMAP.md', 'ROADMAP 快照', '测试代码'],
+    ['docs/HANDOFF.md', 'HANDOFF 代码地图', '个文件'],
+  ]) {
+    // 必须先定位到**那一行**再取数字：整篇搜 /(\d{4,})\s*行/ 会先撞上
+    // 「`src/worker.js` **1708** 行」，于是拿源码行数去比测试行数、报出一个看着像
+    // 文档写错的假失败。我第一版就是这么写的。
+    const row = readDoc(rel).split('\n').find((l) => l.includes(rowKey) && /\d{4,}/.test(l));
+    assert.ok(row, `${label} 必须有含测试代码行数的那一行（关键词「${rowKey}」）`);
+    const claimed = Number(/(\d{4,})/.exec(row)[1]);
+    assert.ok(
+      Math.abs(claimed - actual) / actual < 0.1,
+      `${label} 说测试代码 ${claimed} 行，实际 ${actual} 行（偏差超 10%）——请更新`
+    );
+  }
+});
+
+test('the docs agree with the real commit count', (t) => {
+  // 提交数要查 git，而**浅克隆的 `rev-list --count` 给的是错数**（只有抓下来的那部分），
+  // 无 .git 的 tarball 更是完全拿不到。那种情况下硬断言会让 CI 无故变红，
+  // 所以显式 skip 并说明原因 —— 一个会误报的守卫比没有守卫更糟。
+  // 既有三个文档测试刻意不查 git tag，正是同一考量。
+  if (!existsSync(docsRoot('.git'))) {
+    return t.skip('无 .git（tarball 或导出的源码包），提交数不可得');
+  }
+  let actual;
+  let shallow;
+  try {
+    shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
+      cwd: docsRoot('.'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    actual = Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], {
+      cwd: docsRoot('.'), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim());
+  } catch {
+    return t.skip('git 不可用或当前不是仓库，提交数不可得');
+  }
+  if (shallow === 'true') return t.skip('浅克隆的提交数是错的，跳过');
+  assert.ok(Number.isFinite(actual) && actual > 0, `提交数统计异常（得到 ${actual}）`);
+
+  // 容差 ±5：文档必然落后于「记录它的那个 commit 之后的几次提交」，这是自指造成的
+  // 结构性滞后，不是失真。但差到 5 以上（本次 ROADMAP 差 3、HANDOFF 差 2 都还在容差内，
+  // 而 `npm test` 项数差 119）就说明没人在更新了。
+  for (const [rel, label] of [['ROADMAP.md', 'ROADMAP 快照'], ['docs/HANDOFF.md', 'HANDOFF 现状表']]) {
+    const doc = readDoc(rel);
+    const m = /\|\s*提交数?\s*\|\s*\*{0,2}(\d+)\*{0,2}\s*\|/.exec(doc);
+    assert.ok(m, `${label} 必须有「提交数」一行`);
+    assert.ok(
+      Math.abs(Number(m[1]) - actual) <= 5,
+      `${label} 说提交数 ${m[1]}，实际 ${actual}（差超过 5）——请更新`
     );
   }
 });

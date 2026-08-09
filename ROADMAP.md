@@ -4,7 +4,7 @@
 > 为什么这么做、动手前必须知道哪些坑」；本文件只列「做什么 / 做完了什么」。
 
 审计日期：2026-08-03 · 审计对象：生产 Worker `edgetts-proxy`（服务 https://edgetts.aws.xin）
-最近更新：2026-08-06（全局复盘 + 下一步规划，线上 `v2.22.0`）
+最近更新：2026-08-09（修正失真的快照数字，线上 `v2.29.1`）
 
 ---
 
@@ -46,7 +46,7 @@ UI 只剩本机 `npm test` 守着。
 
 | job | 镜像 | 内容 | 耗时 |
 |---|---|---|---|
-| `test` | `node:22-slim` | 后端 323 项 + build + dist 守卫 | ~51s |
+| `test` | `node:22-slim` | 后端 327 项 + build + dist 守卫 | ~51s |
 | `test:browser` | `node:22-bookworm-slim` + apt chromium | 21 项 browser e2e | ~193s |
 
 **为什么拆开而不是合成一个**：apt 装 chromium 是耗时主项（50s → 193s）。合成一个会让每次
@@ -388,15 +388,21 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 | 维度 | 数字 | 备注 |
 |---|---|---|
 | 生产代码 | `src/worker.js` **1708** 行 + `ui/index.html` **2463** 行 | 单文件 Worker + 内嵌 Vue SPA |
-| 测试代码 | **9142** 行 / **357** 项（345 跑 + 12 需凭证 skip） | 测试:源码 ≈ **2.2:1** |
+| 测试代码 | **9299** 行 / **360** 项（348 跑 + 12 需凭证 skip） | 测试:源码 ≈ **2.2:1** |
 | `src/worker.js` 覆盖率 | **99.47% 行 / 97.76% 分支** | 未覆盖仅 2 处，均为**已证不可达**的防御分支（catch-all 处理器；`input_empty_after_cleaning` 已穷举 5768 种组合证明不可达） |
 | 运行时依赖 | **0** | `node_modules` 空；构建与测试只用 Node 内置能力 |
-| 提交数 | **99** | Conventional Commits |
+| 提交数 | **102** | Conventional Commits |
 | 硬编码密钥扫描 | 干净 | 唯一硬编码 base64 是微软 Edge TTS 客户端的**公开固定签名密钥**（逆向公知），非用户凭据 |
-| 累计修复缺陷 | **10 个**（五轮系统审计） | `cleanText` 7 + WebM 1 + UI 无障碍 1 + CI 守卫缺失 1 |
+| 累计修复缺陷 | **11 个**（五轮系统审计） | `cleanText` 8 + WebM 1 + UI 无障碍 1 + CI 守卫缺失 1 |
 
-**「all files 78.67%」这个数字会误导**：它把 `dist/worker.js`（构建产物，仅被少数测试读取，
-70.94%）也算进去，拉低了均值。真正该看的是 `src/worker.js` 的 99.51%。
+`cleanText` 那 8 个的来源（此前这里记 `cleanText 7`，把 **7 条正则**误当成 7 个缺陷，
+恰好掩盖了漏记的第 8 个，于是总数少算 1、与 HANDOFF 的「11 个」长期矛盾）：
+2.25.0 的 `custom_keywords` 空分支遮蔽 1 个、2.26.0 的小数被吃与 VS16 emoji 残留 2 个、
+2.27.0 的 markdown A/B/C/C2/D 共 5 个（E/F 判定为 markdown 固有歧义，不修、不计）。
+
+**「all files」那个百分比会误导**：它把 `dist/worker.js`（构建产物，仅被少数测试读取，
+**66.90%**）也算进去，把均值拉低到 **76.42%**。真正该看的是 `src/worker.js` 的 99.47%
+（就是上面那一行，此处刻意不再重复具体数字 —— 同一个数字写在多处正是它会漂移的原因）。
 
 ---
 
@@ -410,9 +416,9 @@ launchable`。GitHub 实测：`# tests 28 / pass 19 / skipped 9`。
 ## 命令速查
 
 ```bash
-npm test        # 单元 + 集成 + 回归（226 项，零依赖）
-npm run test:e2e # E2E，需 EDGETTS_E2E=1
-npm run coverage # 覆盖率（当前 src/worker.js 行 99.2% / 分支 98.0%）
+npm test        # 单元 + 集成 + 回归 + browser e2e（360 项，零依赖）
+npm run test:e2e # 真网 E2E，需 EDGETTS_E2E=1
+npm run coverage # 覆盖率（具体数字见上方「项目现状快照」，不在此重复）
 npm run check   # 语法检查 + 单测
 npm run build   # ui/ + src/ → dist/worker.js
 npm run deploy  # 构建并部署（需 wrangler + API_KEY secret 已绑定）

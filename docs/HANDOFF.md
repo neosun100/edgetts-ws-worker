@@ -2,7 +2,7 @@
 
 > **给接手这个项目的人（含其他 AI Agent）：先读这一份，再读代码。**
 >
-> 最后更新：2026-08-08 · 对应版本 `2.30.0` · 线上 `v2.29.1`
+> 最后更新：2026-08-09 · 对应版本 `2.30.2` · 线上 `v2.29.1`
 >
 > 这份文档回答四个问题：**这是什么项目**、**现在是什么状态**、**还剩什么该做**、
 > **动手前必须知道哪些坑**。ROADMAP.md 记「做什么」，CHANGELOG.md 记「做过什么」，
@@ -27,7 +27,7 @@
 | `ui/index.html` | 2463 | **内嵌 Vue SPA**。构建时注入进 Worker（`UI_HTML`） |
 | `scripts/build.mjs` | 64 | `ui/` + `src/` → `dist/worker.js`。含两个守卫（见 §6） |
 | `legacy/worker-ndjson.js` | 166 | **不是死代码**：逐词时间戳（WordBoundary）的唯一来源，见 §5 |
-| `test/{unit,integration,regression,e2e}/` | 23 个文件 / 9142 行 | 测试:源码 ≈ 2.2:1 |
+| `test/{unit,integration,regression,e2e}/` | 23 个文件 / 9299 行 | 测试:源码 ≈ 2.2:1 |
 | `docs/research/*.md` | 5 份 | 系统审计报告，每份都有实测数字 |
 
 ### 项目的由来（**重要背景**）
@@ -46,23 +46,23 @@ Worker，只存在于 Cloudflare 上；而仓库里原有的 `worker.js`（166 �
 
 | 维度 | 数字 | 备注 |
 |---|---|---|
-| 测试 | **344 项**（323 fast + 21 browser e2e） | 另有 12 项真网 e2e 需凭证，默认 skip |
+| 测试 | **348 项**（327 fast + 21 browser e2e） | 另有 12 项真网 e2e 需凭证，默认 skip |
 | `src/worker.js` 覆盖率 | **99.47% 行 / 97.76% 分支** | 未覆盖仅 2 处，均为**已证不可达**的防御分支 |
 | CI | **GitLab + GitHub 双跑**，均含 browser e2e | 2026-08-08 起 |
-| 提交 | 101 | Conventional Commits |
-| 累计修复缺陷 | **11 个**（五轮系统审计） | 见 §4 |
+| 提交 | 103 | Conventional Commits |
+| 累计修复缺陷 | **11 个**（五轮系统审计） | `cleanText` 8 + WebM 1 + UI 无障碍 1 + CI 守卫 1，逐项来源见 `ROADMAP.md` 快照 |
 
 ### ⚠️ 版本与部署的当前真相（别误判）
 
 ```
-package.json   2.30.0
+package.json   2.30.2
 最新 git tag   v2.29.1
 线上           v2.29.1
 ```
 
-**看着像漏部署，其实不是。** `2.30.0` 只改了 `.gitlab-ci.yml` 与文档
-（`git diff --stat v2.29.1..HEAD` 可自行核实：无 `src/` 或 `ui/` 改动），
-所以**线上代码已是最新，无需部署**。
+**看着像漏部署，其实不是。** `2.30.0` / `2.30.1` / `2.30.2` 只改了 `.gitlab-ci.yml`、
+文档与测试（`git diff --stat v2.29.1..HEAD -- src ui` 可自行核实：**输出为空**，
+无 `src/` 或 `ui/` 改动），所以**线上代码已是最新，无需部署**。
 
 但这个模式**踩过一次**：2026-08-08 收尾时发现 `v2.28.0 / 2.28.1 / 2.29.0` 三个版本
 **从未打 tag，也就从未部署** —— 含 UI 无障碍修复和 WebM 空输入守卫。
@@ -74,7 +74,7 @@ package.json   2.30.0
 
 ```bash
 npm run build      # ui/ + src/ → dist/worker.js（必须先跑，多个测试读 dist）
-npm test           # 全量门禁：323 fast + 21 e2e（约 5 分钟）
+npm test           # 全量门禁：327 fast + 21 e2e（约 5 分钟）
 npm run test:fast  # 只跑后端，快速反馈
 npm run coverage   # 带覆盖率
 npm run dev        # wrangler dev
