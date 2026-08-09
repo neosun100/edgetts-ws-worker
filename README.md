@@ -5,8 +5,15 @@
 <h1 align="center">edgetts-ws-worker</h1>
 
 [![CI](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/ci.yml)
+[![Deploy](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/deploy.yml/badge.svg)](https://github.com/neosun100/edgetts-ws-worker/actions/workflows/deploy.yml)
+[![Release](https://img.shields.io/github/v/release/neosun100/edgetts-ws-worker?logo=github&color=success)](https://github.com/neosun100/edgetts-ws-worker/releases/latest)
+[![Tests](https://img.shields.io/badge/tests-359%20passing-brightgreen?logo=nodedotjs&logoColor=white)](#development)
+[![Coverage](https://img.shields.io/badge/coverage-99.47%25-brightgreen)](#development)<br/>
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com)
 [![OpenAI compatible](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)](#api)
+[![Voices](https://img.shields.io/badge/voices-322-8A2BE2)](#get-v1models-get-v1modelspublic)
+[![Runtime deps](https://img.shields.io/badge/runtime%20deps-0-blue)](#development)
+[![Live](https://img.shields.io/badge/live-edgetts.aws.xin-F38020?logo=cloudflare&logoColor=white)](https://edgetts.aws.xin)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **[中文文档 / Chinese](README_CN.md)** · **[Roadmap](ROADMAP.md)** · **[Changelog](CHANGELOG.md)** · **[Handoff / context for contributors](docs/HANDOFF.md)**
